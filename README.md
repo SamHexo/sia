@@ -20,16 +20,15 @@ Three agents work in a loop:
 
 For directory layout, the per-generation execution flow, and prompt customization, see [docs/architecture.md](docs/architecture.md).
 
-### Results
+### Benchmark Results
 
-<table width="100%">
-  <tr>
-    <td width="50%" align="center"><img src="docs/gpqa.png" alt="GPQA Results" height="220"></td>
-    <td width="50%" align="center"><img src="docs/ml_agent.png" alt="ML Agent Results" height="220"></td>
-  </tr>
-</table>
+<p align="center"><img src="docs/images/mlebench.png" alt="MLE Bench Results" width="720"><br><i>OpenAI MLE-Bench Hard: a gauntlet of real Kaggle ML competitions where agents must write, run, and iterate full ML pipelines. SIA ranks #1 across all generations tested.</i></p>
 
-<p align="center"><i>Performance climbs across generations of self-improvement on GPQA and an MLE-Bench task.</i></p>
+<p align="center"><img src="docs/images/lawbench.png" alt="LawBench Results" width="720"><br><i>LawBench: predict the criminal charge from Chinese court case descriptions across 191 charge categories. SIA-W+H reaches 70.1% Top-1 accuracy, beating the prior SOTA of 45%.</i></p>
+
+<p align="center"><img src="docs/images/trimul_cuda.png" alt="TriMul CUDA Results" width="720"><br><i>AlphaFold-3 TriMul Triton Kernel: implement and optimize the Triangle Multiplicative Update as a Triton kernel, preserving correctness while hitting H100 latency targets. SIA-W+H achieves 14x speedup over baseline.</i></p>
+
+<p align="center"><img src="docs/images/denoising.png" alt="Denoising Results" width="720"><br><i>scRNA-seq Denoising: impute missing gene expression values in single-cell RNA sequencing data. SIA-W+H scores 0.289 MSE<sub>norm</sub>, surpassing the prior SOTA of 0.220.</i></p>
 
 ---
 
