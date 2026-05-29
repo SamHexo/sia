@@ -39,12 +39,12 @@ def load_solution(solution_path: str):
     spec = importlib.util.spec_from_file_location("solution", solution_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    if not hasattr(module, "trimul"):
-        raise AttributeError("solution.py must define trimul(Z)")
-    return module.trimul
+    if not hasattr(module, "custom_kernel"):
+        raise AttributeError("solution.py must define custom_kernel(Z)")
+    return module.custom_kernel
 
 
-def reference_trimul(Z):
+def reference_custom_kernel(Z):
     import torch
     import torch.nn.functional as F
     N, _, C = Z.shape
@@ -77,7 +77,7 @@ def benchmark_fn(fn, Z, warmup: int = 10, iters: int = 50) -> float:
     return times[len(times) // 2] * 1000.0
 
 
-def evaluate_on_shape(trimul_fn, shape: tuple) -> dict:
+def evaluate_on_shape(custom_kernel_fn, shape: tuple) -> dict:
     import torch
     N, _, C = shape
     torch.manual_seed(42)
@@ -85,11 +85,11 @@ def evaluate_on_shape(trimul_fn, shape: tuple) -> dict:
     label = f"N={N},C={C}"
 
     # Correctness
-    ref_out = reference_trimul(Z).float()
+    ref_out = reference_custom_kernel(Z).float()
     try:
-        sol_out = trimul_fn(Z.clone()).float()
+        sol_out = custom_kernel_fn(Z.clone()).float()
     except Exception as e:
-        return {"error": f"[{label}] trimul() raised: {e}", "speedup": 0.0}
+        return {"error": f"[{label}] custom_kernel() raised: {e}", "speedup": 0.0}
 
     if sol_out.shape != ref_out.shape:
         return {"error": f"[{label}] Shape mismatch: expected {tuple(ref_out.shape)}, got {tuple(sol_out.shape)}", "speedup": 0.0}
@@ -99,8 +99,8 @@ def evaluate_on_shape(trimul_fn, shape: tuple) -> dict:
         max_diff = (ref_out - sol_out).abs().max().item()
         return {"error": f"[{label}] Correctness failed: max_diff={max_diff:.6f}", "speedup": 0.0}
 
-    ref_ms = benchmark_fn(reference_trimul, Z, WARMUP_ITERS, BENCH_ITERS)
-    sol_ms = benchmark_fn(trimul_fn, Z.clone(), WARMUP_ITERS, BENCH_ITERS)
+    ref_ms = benchmark_fn(reference_custom_kernel, Z, WARMUP_ITERS, BENCH_ITERS)
+    sol_ms = benchmark_fn(custom_kernel_fn, Z.clone(), WARMUP_ITERS, BENCH_ITERS)
     speedup = ref_ms / sol_ms
 
     print(f"  [{label}] ref={ref_ms:.3f}ms  sol={sol_ms:.3f}ms  speedup={speedup:.2f}x", flush=True)
@@ -117,14 +117,14 @@ def score_solution(solution_path: str) -> dict:
         return {"error": "CUDA not available", "score": 0.0}
 
     try:
-        trimul_fn = load_solution(solution_path)
+        custom_kernel_fn = load_solution(solution_path)
     except Exception as e:
         return {"error": f"Failed to load solution: {e}", "score": 0.0}
 
     per_shape = {}
     for shape in BENCHMARK_SHAPES:
         label = f"{shape[0]}x{shape[1]}x{shape[2]}"
-        per_shape[label] = evaluate_on_shape(trimul_fn, shape)
+        per_shape[label] = evaluate_on_shape(custom_kernel_fn, shape)
 
     valid_speedups = [r["speedup"] for r in per_shape.values() if r.get("error") is None and r.get("speedup", 0) > 0]
 

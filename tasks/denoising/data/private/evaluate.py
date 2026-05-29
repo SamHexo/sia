@@ -53,9 +53,9 @@ def load_solution(solution_path: str):
     spec = importlib.util.spec_from_file_location("solution", solution_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    if not hasattr(module, "magic_denoise"):
-        raise AttributeError(f"solution.py must define magic_denoise()")
-    return module.magic_denoise
+    if not hasattr(module, "custom_denoise"):
+        raise AttributeError(f"solution.py must define custom_denoise()")
+    return module.custom_denoise
 
 
 def evaluate_mse(test_data, denoised):
@@ -113,7 +113,7 @@ def _load_dataset(name: str):
     return X_train, X_test
 
 
-def run_evaluation_on_dataset(magic_denoise_fn, name: str) -> dict:
+def run_evaluation_on_dataset(custom_denoise_fn, name: str) -> dict:
     import numpy as np
 
     baseline = DATASETS[name]
@@ -127,9 +127,9 @@ def run_evaluation_on_dataset(magic_denoise_fn, name: str) -> dict:
 
     t0 = time.time()
     try:
-        Y_denoised = magic_denoise_fn(X_train, random_state=_PRIVATE_SEED)
+        Y_denoised = custom_denoise_fn(X_train, random_state=_PRIVATE_SEED)
     except Exception as e:
-        return {"error": f"magic_denoise failed on {name}: {e}", "score": 0.0}
+        return {"error": f"custom_denoise failed on {name}: {e}", "score": 0.0}
     elapsed = time.time() - t0
 
     Y_denoised = np.asarray(Y_denoised)
@@ -190,17 +190,42 @@ def score_solution(solution_path: str) -> dict:
     }
 
 
+def _best_solution_from_state(gen_dir: str) -> str | None:
+    """Return the solution_path of the best-scoring node in gen_dir/state.json, or None."""
+    state_path = os.path.join(gen_dir, "state.json")
+    if not os.path.exists(state_path):
+        return None
+    try:
+        with open(state_path) as f:
+            tree = json.load(f)
+        best_score, best_path = -1.0, None
+        for node in tree.get("nodes", {}).values():
+            r = node.get("result")
+            if isinstance(r, dict) and "score" in r and node.get("solution_path"):
+                if float(r["score"]) > best_score:
+                    best_score = float(r["score"])
+                    best_path = node["solution_path"]
+        return best_path
+    except Exception:
+        return None
+
+
 def main():
     parser = argparse.ArgumentParser(description="Private evaluator — denoising task")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--run-dir", help="Run directory (evaluates all gen_X/)")
+    group.add_argument("--run-dir", help="Run directory (evaluates best solution per gen_X/)")
     group.add_argument("--gen-dir", help="Single generation directory")
-    group.add_argument("solution", nargs="?", help="Path to a single solution.py")
+    group.add_argument("solution", nargs="?", help="Path to a candidate solution file")
     args = parser.parse_args()
 
     if args.gen_dir:
         gen_dir = os.path.abspath(args.gen_dir)
-        result = score_solution(os.path.join(gen_dir, "solution.py"))
+        sol = _best_solution_from_state(gen_dir)
+        if not sol or not os.path.exists(sol):
+            print(f"[private] No valid solution found in state.json for {gen_dir}", file=sys.stderr)
+            sys.exit(1)
+        print(f"[private] Best solution: {sol}")
+        result = score_solution(sol)
         out_path = os.path.join(gen_dir, "private_result.json")
         with open(out_path, "w") as f:
             json.dump(result, f, indent=2)
@@ -217,8 +242,12 @@ def main():
         all_scores = {}
         for gen_dir in gen_dirs:
             gen_name = os.path.basename(gen_dir)
-            print(f"\n[{gen_name}] Evaluating...")
-            result = score_solution(os.path.join(gen_dir, "solution.py"))
+            sol = _best_solution_from_state(gen_dir)
+            if not sol or not os.path.exists(sol):
+                print(f"\n[{gen_name}] No valid solution in state.json — skipping")
+                continue
+            print(f"\n[{gen_name}] Best solution: {sol}")
+            result = score_solution(sol)
             all_scores[gen_name] = result
             out_path = os.path.join(gen_dir, "private_result.json")
             with open(out_path, "w") as f:
@@ -235,8 +264,11 @@ def main():
 
     else:
         result = score_solution(args.solution)
+        out_path = os.path.join(os.getcwd(), "private_result.json")
+        with open(out_path, "w") as f:
+            json.dump(result, f, indent=2)
         print(json.dumps(result, indent=2))
-        print(f"\nAvg SCORE: {result['score']:.4f}")
+        print(f"\nAvg SCORE: {result['score']:.4f}  (written to {out_path})")
 
 
 if __name__ == "__main__":

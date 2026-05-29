@@ -1,0 +1,7 @@
+search:
+  c_puct: 1.5              # PUCT exploration constant (higher = more exploration)
+  max_inner_turns: 12      # LLM turns per node (GPU kernels need more turns for Triton code)
+
+exploration:
+  restart_on_stagnation: true
+  stagnation_patience: 5

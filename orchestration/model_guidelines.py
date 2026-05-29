@@ -1,5 +1,5 @@
 """
-Model-specific guidelines injected into meta-agent and feedback agent prompts.
+Model-specific guidelines injected into the meta-agent prompt (all generations).
 
 Guidelines live in prompts/model_specific/<name>.md — add a new file to onboard a new model.
 """

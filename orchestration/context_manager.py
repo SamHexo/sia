@@ -77,9 +77,11 @@ class ContextManager:
             current_agent_path = gen_data['agent_path']
             current_agent_code = Path(current_agent_path).read_text(encoding='utf-8')
 
-            # Read previous generation's target_agent.py
+            # Read previous generation's target_agent.py (support both package and flat layouts)
             prev_gen_dir = os.path.join(self.run_dir, f"gen_{gen_num - 1}")
-            prev_agent_path = os.path.join(prev_gen_dir, "target_agent.py")
+            prev_agent_path = os.path.join(prev_gen_dir, "target_agent", "target_agent.py")
+            if not os.path.exists(prev_agent_path):
+                prev_agent_path = os.path.join(prev_gen_dir, "target_agent.py")
             prev_agent_code = Path(prev_agent_path).read_text(encoding='utf-8') if os.path.exists(prev_agent_path) else "Not available"
 
             # Read improvement.md from current generation
@@ -202,10 +204,12 @@ class ContextManager:
                 - success: bool, whether execution succeeded
                 - timestamp: str, execution timestamp
                 - duration: float, execution duration in seconds
-                - agent_path: str, path to target_agent.py
+                - agent_path: str, path to target_agent.py (inside target_agent/ package)
                 - gen_dir: str, path to generation directory
                 - improvement_path: Optional[str], path to improvement.md
                 - execution_type: str, 'Single' or 'Multi-trajectory'
+                - tree_summary: Optional[str], summary of persistent research tree
+                - supervision_decision: Optional[str], decision from supervision check
         """
         # Extract agent stats
         agent_stats = self._get_agent_stats(gen_data['agent_path'])
@@ -469,7 +473,7 @@ class ContextManager:
             delta_lines = deltas.get('lines_delta', 0)
             delta_lines_str = f"+{delta_lines}" if delta_lines > 0 else f"{delta_lines}"
 
-            entry += f"""- Modified by feedback agent
+            entry += f"""- Modified by meta-agent
 - File size: {stats['size']:,} bytes ({delta_size_str})
 - Lines: {stats['lines']} ({delta_lines_str} lines)
 """
@@ -486,6 +490,17 @@ class ContextManager:
 ### Evolution Summary (LLM Analysis)
 {llm_summary}
 """
+
+        # Tree state
+        tree_summary = gen_data.get('tree_summary', '')
+        sup_decision = gen_data.get('supervision_decision', '')
+        if tree_summary:
+            entry += f"""
+### Persistent Research Tree
+{tree_summary}
+"""
+        if sup_decision and sup_decision not in ('natural_exit', 'continue', ''):
+            entry += f"- Supervision decision: **{sup_decision.upper()}**\n"
 
         entry += f"""
 ### Execution Summary

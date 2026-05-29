@@ -109,7 +109,7 @@ For these focused sub-calls, be highly directive:
 
 2. **For code generation sub-tasks, require write_file with the target path.**
    Do not ask for code in the final channel — it will be truncated and hard to parse.
-   Instead: "Write the complete Python function to <working_dir>/solution.py using write_file."
+   Instead: "Write the complete Python function to <working_dir>/candidate_01.py using write_file."
 
 3. **For analytical sub-tasks (e.g. dataset inspection), require a single write_file.**
    Example prompt for dataset schema extraction:
@@ -123,4 +123,4 @@ For these focused sub-calls, be highly directive:
 
 5. **Never ask for open-ended reasoning in a focused sub-call.**
    "Think about the best approach and implement it" → bad for a sub-task (wastes turns).
-   "Implement a Gaussian-weighted kNN denoiser and write it to solution.py" → good.
+   "Implement a Gaussian-weighted kNN denoiser and write it to candidate_01.py" → good.

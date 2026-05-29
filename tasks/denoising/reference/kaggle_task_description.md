@@ -21,7 +21,7 @@ Evaluation uses **Molecular Cross-Validation**: molecules within each cell are r
 Implement a function with the following signature:
 
 ```python
-def magic_denoise(X, **kwargs):
+def custom_denoise(X, **kwargs):
     # X: numpy array (n_cells, n_genes) — raw count matrix
     # Returns: denoised array of same shape, non-negative floats
 ```
@@ -62,7 +62,7 @@ A method that overfits pancreas will typically produce very high Poisson NLL on 
 ```python
 import magic, numpy as np, scprep
 
-def magic_denoise(X, **kwargs):
+def custom_denoise(X, **kwargs):
     X = np.asarray(X, dtype=float)
     X_sqrt = np.sqrt(X)
     X_norm, libsize = scprep.normalize.library_size_normalize(

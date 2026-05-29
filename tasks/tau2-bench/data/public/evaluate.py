@@ -90,11 +90,6 @@ def main():
     result.setdefault("accuracy", result.get("score", 0.0))
     result.setdefault("lower_is_better", False)
 
-    results_path = os.path.join(os.path.dirname(predictions_path), "results.json")
-    with open(results_path, "w") as f:
-        json.dump(result, f, indent=2)
-    print(f"\nResults written to: {results_path}", flush=True)
-
     print("\n=== EVALUATION RESULT ===")
     print(json.dumps(result, indent=2))
     print("=========================")
@@ -104,6 +99,7 @@ def main():
     else:
         print(f"\nFAILED: {result.get('error', 'pass rate = 0')}")
 
+    print(f"RESULT_JSON:{json.dumps(result)}")
     sys.exit(0)
 
 

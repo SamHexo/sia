@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Evaluate a trimul solution against the TriMul benchmark.
+Evaluate a custom_kernel solution against the TriMul benchmark.
 
 Usage:
     python evaluate.py solution.py
 
-The solution.py must define a top-level `trimul(Z)` function.
+The solution.py must define a top-level `custom_kernel(Z)` function.
 Outputs results.json next to solution.py.
 """
 
@@ -29,12 +29,12 @@ def load_solution(solution_path: str):
     spec = importlib.util.spec_from_file_location("solution", solution_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    if not hasattr(module, "trimul"):
-        raise AttributeError(f"solution.py must define trimul(Z), not found in {solution_path}")
-    return module.trimul
+    if not hasattr(module, "custom_kernel"):
+        raise AttributeError(f"solution.py must define custom_kernel(Z), not found in {solution_path}")
+    return module.custom_kernel
 
 
-def reference_trimul(Z):
+def reference_custom_kernel(Z):
     import torch
     import torch.nn.functional as F
     N, _, C = Z.shape
@@ -68,7 +68,7 @@ def benchmark_fn(fn, Z, warmup: int = 10, iters: int = 50) -> float:
     return times[len(times) // 2] * 1000.0  # median in ms
 
 
-def run_evaluation(trimul_fn) -> dict:
+def run_evaluation(custom_kernel_fn) -> dict:
     import torch
     if not torch.cuda.is_available():
         return {
@@ -84,16 +84,16 @@ def run_evaluation(trimul_fn) -> dict:
 
     # Reference run (establishes baseline time)
     print("Benchmarking reference implementation...", flush=True)
-    ref_time_ms = benchmark_fn(reference_trimul, Z, WARMUP_ITERS, BENCH_ITERS)
-    ref_out = reference_trimul(Z).float()
+    ref_time_ms = benchmark_fn(reference_custom_kernel, Z, WARMUP_ITERS, BENCH_ITERS)
+    ref_out = reference_custom_kernel(Z).float()
     print(f"Reference: {ref_time_ms:.3f} ms", flush=True)
 
     # Correctness check
     print("Running correctness check...", flush=True)
     try:
-        sol_out = trimul_fn(Z.clone()).float()
+        sol_out = custom_kernel_fn(Z.clone()).float()
     except Exception as e:
-        return {"error": f"trimul() raised an exception: {e}\n{traceback.format_exc()}", "score": 0.0}
+        return {"error": f"custom_kernel() raised an exception: {e}\n{traceback.format_exc()}", "score": 0.0}
 
     if sol_out.shape != ref_out.shape:
         return {
@@ -116,7 +116,7 @@ def run_evaluation(trimul_fn) -> dict:
 
     # Solution benchmark
     print("Benchmarking solution...", flush=True)
-    sol_time_ms = benchmark_fn(trimul_fn, Z.clone(), WARMUP_ITERS, BENCH_ITERS)
+    sol_time_ms = benchmark_fn(custom_kernel_fn, Z.clone(), WARMUP_ITERS, BENCH_ITERS)
     print(f"Solution:  {sol_time_ms:.3f} ms", flush=True)
 
     speedup = ref_time_ms / sol_time_ms
@@ -142,12 +142,12 @@ def main():
     else:
         print(f"Loading solution from: {solution_path}", flush=True)
         try:
-            trimul_fn = load_solution(solution_path)
+            custom_kernel_fn = load_solution(solution_path)
         except Exception as e:
             result = {"error": f"Failed to load solution: {e}", "score": 0.0}
         else:
             try:
-                result = run_evaluation(trimul_fn)
+                result = run_evaluation(custom_kernel_fn)
             except Exception as e:
                 result = {
                     "error": f"Evaluation failed: {e}\n{traceback.format_exc()}",
@@ -156,17 +156,6 @@ def main():
 
     result["accuracy"] = result.get("score", 0.0)
     result["lower_is_better"] = False
-
-    try:
-        with open(solution_path) as f:
-            result["solution_code"] = f.read()
-    except Exception:
-        result["solution_code"] = None
-
-    results_path = os.path.join(os.path.dirname(solution_path), "results.json")
-    with open(results_path, "w") as f:
-        json.dump(result, f, indent=2)
-    print(f"Results written to: {results_path}", flush=True)
 
     # Print without solution_code (too large)
     display = {k: v for k, v in result.items() if k != "solution_code"}
@@ -182,6 +171,7 @@ def main():
     else:
         print(f"\nFAILED: {result.get('error', 'Unknown error')}")
 
+    print(f"RESULT_JSON:{json.dumps({k: v for k, v in result.items() if k != 'solution_code'})}")
     sys.exit(0)
 
 

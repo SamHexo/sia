@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Evaluate a magic_denoise solution against the pancreas benchmark.
+Evaluate a custom_denoise solution against the pancreas benchmark.
 
 Usage:
     python evaluate.py solution.py
 
-The solution.py must define a top-level `magic_denoise(X, **kwargs)` function.
+The solution.py must define a top-level `custom_denoise(X, **kwargs)` function.
 
 Outputs a JSON result to stdout and exits 0 on success, 1 on failure.
 """
@@ -14,6 +14,7 @@ import sys
 import os
 import json
 import time
+import argparse
 import importlib.util
 import traceback
 from pathlib import Path
@@ -39,9 +40,9 @@ def load_solution(solution_path: str):
     spec = importlib.util.spec_from_file_location("solution", solution_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    if not hasattr(module, "magic_denoise"):
-        raise AttributeError(f"solution.py must define magic_denoise(), not found in {solution_path}")
-    return module.magic_denoise
+    if not hasattr(module, "custom_denoise"):
+        raise AttributeError(f"solution.py must define custom_denoise(), not found in {solution_path}")
+    return module.custom_denoise
 
 
 def evaluate_mse(test_data, denoised):
@@ -85,7 +86,7 @@ def _split_data(adata, seed: int = 0):
     return adata
 
 
-def run_evaluation(magic_denoise_fn, seed=42):
+def run_evaluation(custom_denoise_fn, seed=42, iteration_id: int = 0):
     import numpy as np
     import anndata as ad
     import scprep
@@ -103,10 +104,10 @@ def run_evaluation(magic_denoise_fn, seed=42):
     X_test = scprep.utils.toarray(adata.obsm["test"])
 
     print(f"Data loaded: {X_train.shape[0]} cells x {X_train.shape[1]} genes", flush=True)
-    print(f"Running magic_denoise...", flush=True)
+    print(f"Running custom_denoise...", flush=True)
 
     t0 = time.time()
-    Y_denoised = magic_denoise_fn(X_train, random_state=seed)
+    Y_denoised = custom_denoise_fn(X_train, random_state=seed)
     elapsed = time.time() - t0
 
     print(f"Finished in {elapsed:.1f}s", flush=True)
@@ -134,22 +135,26 @@ def run_evaluation(magic_denoise_fn, seed=42):
     score = (mse_norm + poisson_norm) / 2
 
     return {
+        "score": score,
+        "iteration_id": iteration_id,
+        "lower_is_better": False,
         "mse": mse,
         "poisson": poisson,
         "mse_norm": mse_norm,
         "poisson_norm": poisson_norm,
-        "score": score,
         "elapsed_seconds": elapsed,
         "error": None,
     }
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python evaluate.py solution.py", file=sys.stderr)
-        sys.exit(1)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("solution", help="Path to solution.py")
+    parser.add_argument("--iteration_id", type=int, default=0,
+                        help="Sequence number of this evaluation within the current generation")
+    args = parser.parse_args()
 
-    solution_path = os.path.abspath(sys.argv[1])
+    solution_path = os.path.abspath(args.solution)
     if not os.path.exists(solution_path):
         print(json.dumps({"error": f"File not found: {solution_path}", "score": 0.0}))
         sys.exit(1)
@@ -164,7 +169,7 @@ def main():
         sys.exit(1)
 
     try:
-        result = run_evaluation(magic_fn)
+        result = run_evaluation(magic_fn, iteration_id=args.iteration_id)
     except Exception as e:
         result = {
             "error": f"Evaluation failed: {e}\n{traceback.format_exc()}",
@@ -173,19 +178,9 @@ def main():
             "poisson": None,
         }
 
-    # Write results.json next to solution.py so the orchestrator can track scores
     result["accuracy"] = result.get("score", 0.0)
-    try:
-        with open(solution_path) as _sf:
-            result["solution_code"] = _sf.read()
-    except Exception:
-        result["solution_code"] = None
-    results_path = os.path.join(os.path.dirname(solution_path), "results.json")
-    with open(results_path, "w") as f:
-        json.dump(result, f, indent=2)
-    print(f"Results written to: {results_path}", flush=True)
 
-    # Print metrics to stdout (exclude solution_code — it's large and already saved to disk)
+    # Print metrics to stdout (exclude solution_code — it's large)
     result_for_stdout = {k: v for k, v in result.items() if k != "solution_code"}
     print("\n=== EVALUATION RESULT ===")
     print(json.dumps(result_for_stdout, indent=2))
@@ -199,6 +194,7 @@ def main():
     else:
         print(f"\nFAILED: {result.get('error', 'Unknown error')}")
 
+    print(f"RESULT_JSON:{json.dumps({k: v for k, v in result.items() if k != 'solution_code'})}")
     sys.exit(0)
 
 
