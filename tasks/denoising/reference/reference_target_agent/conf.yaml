@@ -1,0 +1,10 @@
+search:
+  c_puct: 1.5              # PUCT exploration constant (higher = more exploration)
+  max_inner_turns: 10      # max LLM turns per node expansion (inner loop budget)
+  max_eval_retries: 1      # retry attempts when evaluate.py returns an error (0 = no retry)
+
+exploration:
+  temperature: 1.0         # diversity in candidate generation (lower = more focused)
+  top_k_parents: 3         # number of top nodes to consider as parents for next candidates
+  restart_on_stagnation: true  # restart from a new branch if stuck for N iterations
+  stagnation_patience: 5   # iterations without improvement before restart
