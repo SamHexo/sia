@@ -15,8 +15,10 @@ TASK_MODEL_TEMPERATURE=0.3
 META_MODEL="gemini/gemini-3.1-pro-preview"
 SUPERVISION_MODEL="gemini/gemini-3.1-pro-preview"
 SUPERVISION_INTERVAL=5
-SUPERVISION_CHECK_TIMEOUT_MIN=10
-TASK_MODEL="tinker://0526a884-428d-5756-8234-0d66db58a27a:train:0/sampler_weights/000005"
+SUPERVISION_CHECK_TIMEOUT_MIN=20
+#TASK_MODEL="tinker://0526a884-428d-5756-8234-0d66db58a27a:train:0/sampler_weights/000005"
+TASK_MODEL="openai/gpt-oss-120b"
+
 BACKEND="openhands"
 # Optional: path to a reference solution to seed the gen-0 tree.
 # If set and the file exists, it is evaluated and written as the first node before the MCTS loop.

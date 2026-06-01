@@ -92,6 +92,15 @@ TOOLS = [
 TOOLS_TS = """\
 namespace functions {
 
+// Primary feedback loop — submit code, get score immediately.
+// No separate evaluate tool exists: this is the only way to measure performance.
+// Expected workflow: write attempt → submit → read score → improve → submit again.
+// Call as many times as needed. Stop only when satisfied.
+type submit_solution = (_: {
+// Complete Python source for your solution
+code: string,
+}) => any;
+
 // Run a bash command inside the working or dataset directory.
 type bash = (_: {
 command: string,
@@ -106,15 +115,6 @@ path: string,
 type write_file = (_: {
 path: string,
 content: string,
-}) => any;
-
-// Primary feedback loop — submit code, get score immediately.
-// No separate evaluate tool exists: this is the only way to measure performance.
-// Expected workflow: write attempt → submit → read score → improve → submit again.
-// Call as many times as needed. Stop only when satisfied.
-type submit_solution = (_: {
-// Complete Python source for your solution
-code: string,
 }) => any;
 
 } // namespace functions"""
@@ -224,6 +224,17 @@ def main():
     evaluate_path = os.path.join(dataset_dir, "evaluate.py")
     today         = date.today().isoformat()
 
+    # Pre-collect installed packages so the model doesn't need bash to discover them
+    _pkg_info = ""
+    for _cmd in ([sys.executable, "-m", "pip", "list", "--format=columns"],):
+        try:
+            _r = subprocess.run(_cmd, capture_output=True, text=True, timeout=30)
+            if _r.returncode == 0 and _r.stdout.strip():
+                _pkg_info = _r.stdout.strip()
+                break
+        except Exception:
+            pass
+
     start_time = time.time()
     supervision_consecutive_fails = 0
 
@@ -232,7 +243,7 @@ You are ChatGPT, a large language model trained by OpenAI.
 Knowledge cutoff: 2024-06
 Current date: {today}
 
-Reasoning: high
+Reasoning: medium
 
 # Valid channels: analysis, commentary, final. Channel must be included for every message.
 Calls to these tools must go to the commentary channel: 'functions'."""
@@ -264,19 +275,21 @@ Calls to these tools must go to the commentary channel: 'functions'."""
                 "then iterate."
             )
 
+        pkg_section = f"\n## Installed packages (pre-checked — no need to run pip)\n\n```\n{_pkg_info}\n```\n" if _pkg_info else ""
+
         developer_content = f"""\
 # Instructions
 
 {task_md}
-
+{pkg_section}
 ## Your goal
 
 Write a solution as described in the task above and submit it via `submit_solution(code)`.
 
 {parent_section}
 
-You may explore the dataset directory, read existing solutions in `{solutions_dir}/`, and run experiments.
-When ready, call `submit_solution(code)` — it evaluates your code and returns the speedup score immediately.
+**Start by submitting.** Your first action must be `submit_solution` — bash and read_file are locked until you have submitted at least once. After that, use bash and read_file freely: inspect the dataset, read existing solutions, test ideas. Explore as much as you want between submissions.
+
 If the score is low or there's an error, fix your code and call `submit_solution` again.
 **Stop making tool calls only when you are satisfied with your score.**
 
@@ -300,11 +313,15 @@ Dataset directory (read-only):           {dataset_dir}
         ]
         trajectory = []
         submissions: list[dict] = []
+        iteration_uid = str(_uuid_mod.uuid4())[:8]  # single UID for this inner run — overwrites on each submit
 
         for turn in range(1, max_inner_turns + 1):
             turns_left = max_inner_turns - turn
             if turn == 1:
-                status = "Please produce and submit your solution."
+                status = (
+                    "Submit your first solution now — bash and read_file are locked until you do. "
+                    "After that you can explore the dataset, read solutions, or run experiments freely."
+                )
             elif turns_left <= 1:
                 status = (
                     f"[Turn {turn}/{max_inner_turns}] LAST TURN. "
@@ -350,13 +367,19 @@ Dataset directory (read-only):           {dataset_dir}
 
             for tc in tool_calls:
                 name, targs = tc["name"], tc["args"]
-                if name == "bash":
+                if name in ("bash", "read_file") and not submissions:
+                    out = (
+                        "[BLOCKED] bash and read_file are locked until you submit at least once. "
+                        "Call submit_solution first — after that you can explore freely."
+                    )
+                elif name == "bash":
                     out = _tools.bash(targs.get("command", ""), working_dir=working_dir, dataset_dir=dataset_dir, solutions_dir=solutions_dir)
                 elif name == "read_file":
                     out = _tools.read_file(targs.get("path", ""), working_dir=working_dir, dataset_dir=dataset_dir, solutions_dir=solutions_dir)
                 elif name == "write_file":
                     out = _tools.write_file(targs.get("path", ""), targs.get("content", ""), working_dir=working_dir)
                 elif name == "submit_solution":
+                    # Same UID every time — overwrites file + upserts node in state.json.
                     out = _tools.submit_solution(
                         targs.get("code", ""),
                         solutions_dir=solutions_dir,
@@ -365,6 +388,7 @@ Dataset directory (read-only):           {dataset_dir}
                         state_file=args.state_file,
                         current_gen=args.current_gen,
                         write_node_fn=_write_tree_node_util,
+                        uid=iteration_uid,
                     )
                     try:
                         sub = json.loads(out)
@@ -444,7 +468,7 @@ Dataset directory (read-only):           {dataset_dir}
             "inner_trajectory": [],
         }
 
-        # 3. Run inner agent — submit_solution handles eval + state.json registration
+        # 3. Run inner agent — submit_solution evaluates only; tree registration happens below
         submissions, inner_traj = _run_inner_agent(parent_node, parent_code)
 
         if not submissions:

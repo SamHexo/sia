@@ -17,6 +17,7 @@ import time
 import argparse
 import importlib.util
 import traceback
+import secrets
 from pathlib import Path
 
 # Make the repo root importable so we can pull from tasks.denoising._vendor.*
@@ -168,8 +169,11 @@ def main():
         print(json.dumps(result))
         sys.exit(1)
 
+    eval_seed = secrets.randbelow(2**31)
+    print(f"Evaluation seed: {eval_seed}", flush=True)
+
     try:
-        result = run_evaluation(magic_fn, iteration_id=args.iteration_id)
+        result = run_evaluation(magic_fn, seed=eval_seed, iteration_id=args.iteration_id)
     except Exception as e:
         result = {
             "error": f"Evaluation failed: {e}\n{traceback.format_exc()}",

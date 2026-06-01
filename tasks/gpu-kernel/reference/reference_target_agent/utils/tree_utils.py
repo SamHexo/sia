@@ -68,21 +68,43 @@ def write_tree_node(
     result["iteration_id"] = iteration_id
 
     is_buggy = bool(result.get("error"))
-    node_id = f"node_{len(tree['nodes']):04d}"
-    node = {
-        "id": node_id,
-        "parent": tree["root_id"],
-        "children": [],
-        "uuid": node_uuid,
-        "generation": generation,
-        "solution_path": uuid_sol_path,
-        "result": result,
-        "visits": 1,
-        "status": "buggy" if is_buggy else "evaluated",
-        "metadata": {},
-    }
-    tree["nodes"][node_id] = node
-    tree["nodes"][tree["root_id"]]["children"].append(node_id)
+
+    # Upsert: if a node with the same UUID already exists, overwrite only if score improves
+    existing_id = next(
+        (nid for nid, n in tree["nodes"].items() if n.get("uuid") == node_uuid),
+        None,
+    )
+    if existing_id:
+        node_id = existing_id
+        existing_score = (tree["nodes"][node_id].get("result") or {}).get("score") or -1.0
+        new_score = result.get("score") or -1.0
+        if not is_buggy and new_score > existing_score:
+            tree["nodes"][node_id]["result"]        = result
+            tree["nodes"][node_id]["solution_path"] = uuid_sol_path
+            tree["nodes"][node_id]["status"]        = "evaluated"
+            logger.info(f"Node improved: {node_id} uuid={node_uuid[:8]} score={new_score:.4f}")
+        elif is_buggy and tree["nodes"][node_id].get("status") == "buggy":
+            tree["nodes"][node_id]["result"]        = result
+            tree["nodes"][node_id]["solution_path"] = uuid_sol_path
+        else:
+            logger.info(f"Node unchanged: {node_id} uuid={node_uuid[:8]} (new={new_score:.4f} <= best={existing_score:.4f})")
+    else:
+        node_id = f"node_{len(tree['nodes']):04d}"
+        node = {
+            "id": node_id,
+            "parent": tree["root_id"],
+            "children": [],
+            "uuid": node_uuid,
+            "generation": generation,
+            "solution_path": uuid_sol_path,
+            "result": result,
+            "visits": 1,
+            "status": "buggy" if is_buggy else "evaluated",
+            "metadata": {},
+        }
+        tree["nodes"][node_id] = node
+        tree["nodes"][tree["root_id"]]["children"].append(node_id)
+        logger.info(f"Node written: {node_id} uuid={node_uuid[:8]} score={result.get('score', 0.0):.4f}")
 
     if not is_buggy:
         cur_best = tree.get("best_node_id")
@@ -96,7 +118,6 @@ def write_tree_node(
     with open(tmp, "w") as f:
         json.dump(tree, f, indent=2)
     os.replace(tmp, state_file)
-    logger.info(f"Node written: {node_id} uuid={node_uuid[:8]} score={result.get('score', 0.0):.4f}")
     return node_id
 
 

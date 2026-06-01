@@ -105,9 +105,11 @@ def submit_solution(
     state_file: str | None = None,
     current_gen: int = 0,
     write_node_fn=None,
+    uid: str | None = None,
 ) -> str:
     """Write code to solutions/{uid}.py, evaluate it, register in state.json. Returns JSON."""
-    uid = str(_uuid.uuid4())[:8]
+    if uid is None:
+        uid = str(_uuid.uuid4())[:8]
     sol_path = os.path.join(solutions_dir, f"{uid}.py")
 
     try:

@@ -558,7 +558,7 @@ _init_gen_state(first_gen_directory, task_id)
 import venv
 import subprocess
 
-venv_dir = os.path.join(RUN_DIRECTORY, "venv")
+venv_dir = os.path.abspath(os.path.join(RUN_DIRECTORY, "venv"))
 logger.info(f"Creating venv at: {venv_dir}")
 uv_available = subprocess.run(["which", "uv"], capture_output=True).returncode == 0
 if uv_available:
@@ -842,7 +842,7 @@ import threading as _threading
 
 def _run_final_private_scores() -> None:
     """Find the best solution across all gens and run private scoring. Called by safety timer."""
-    private_eval = os.path.join(task_dir, "data/private/evaluate.py")
+    private_eval = os.path.abspath(os.path.join(task_dir, "data/private/evaluate.py"))
     if not os.path.exists(private_eval):
         return
     best_sol, best_score_fs, best_gen_fs = None, -1.0, -1
@@ -1137,6 +1137,7 @@ while True:
             _run_meta_agent(fb_prompt, current_gen_directory, current_gen)
             tree_summary = _write_state_summary(current_gen_directory)
             logger.info(f"  ✓ Broken gen fixed — restarting gen_{current_gen} with repaired scaffold")
+            current_gen -= 1  # undo the increment at the top of the loop
             continue
         else:
             logger.warning("  ⚠ Fallback failed — continuing without rollback")
@@ -1178,7 +1179,7 @@ while True:
 
     # ── Private evaluation ────────────────────────────────────────────────────
 
-    private_eval = os.path.join(task_dir, "data/private/evaluate.py")
+    private_eval = os.path.abspath(os.path.join(task_dir, "data/private/evaluate.py"))
     if os.path.exists(private_eval):
         if not gen_best_sol or not os.path.exists(gen_best_sol):
             logger.warning(f"  [private] No valid solution in state.json for gen_{current_gen} — skipping")
@@ -1187,15 +1188,26 @@ while True:
                 os.path.join(RUN_DIRECTORY, "private_scores", f"gen_{current_gen}")
             )
             os.makedirs(priv_work_dir, exist_ok=True)
+            priv_log_path = os.path.join(priv_work_dir, "evaluate_stdout.log")
             logger.info(f"  [private] evaluating gen_{current_gen}: {gen_best_sol}")
-            rc = _run_command(f"{python_exec} {private_eval} {gen_best_sol}", cwd=priv_work_dir)
+            try:
+                priv_proc = subprocess.run(
+                    [python_exec, private_eval, gen_best_sol],
+                    capture_output=True, text=True, cwd=priv_work_dir, timeout=600,
+                )
+                priv_output = priv_proc.stdout + (f"\n[stderr]\n{priv_proc.stderr}" if priv_proc.stderr.strip() else "")
+                Path(priv_log_path).write_text(priv_output, encoding="utf-8")
+            except Exception as _pe:
+                priv_output = f"[exception] {_pe}"
+                Path(priv_log_path).write_text(priv_output, encoding="utf-8")
             priv_result_path = os.path.join(priv_work_dir, "private_result.json")
             if os.path.exists(priv_result_path):
                 with open(priv_result_path) as f:
                     priv_result = json.load(f)
                 logger.info(f"  [private] gen_{current_gen}: score={priv_result.get('score', '?')}")
             else:
-                logger.warning(f"  [private] gen_{current_gen}: private_result.json not written (exit code {rc})")
+                logger.warning(f"  [private] gen_{current_gen}: private_result.json not written — see {priv_log_path}")
+                logger.warning(f"  [private] output tail: {priv_output[-500:]}")
 
     # ── Regenerate plot ───────────────────────────────────────────────────────
 
