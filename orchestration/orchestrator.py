@@ -91,6 +91,7 @@ logger = logging.getLogger(__name__)
 # ========================
 
 _current_proc: "subprocess.Popen | None" = None
+_current_exit_reason_path: "str | None" = None  # updated each gen so signal handler can write it
 
 
 def _kill_proc(proc) -> None:
@@ -114,7 +115,15 @@ def _kill_current_proc() -> None:
 
 
 def _signal_handler(signum, frame):
-    logger.warning(f"Received signal {signum} — killing subprocess and exiting.")
+    sig_name = {2: "SIGINT", 15: "SIGTERM"}.get(signum, f"signal {signum}")
+    logger.warning(f"Received {sig_name} — killing subprocess and exiting.")
+    if _current_exit_reason_path and not os.path.exists(_current_exit_reason_path):
+        try:
+            Path(_current_exit_reason_path).write_text(
+                f"broken_gen: orchestrator received {sig_name} — process killed by external signal"
+            )
+        except Exception:
+            pass
     _kill_current_proc()
     sys.exit(1)
 
@@ -885,6 +894,13 @@ def _safety_timer_fn():
         f"⏰ Safety timeout reached ({_SAFETY_TIMEOUT_S:.0f}s = "
         f"{args.exp_duration_min * 1.3:.0f} min) — killing agent and finalizing."
     )
+    if _current_exit_reason_path and not os.path.exists(_current_exit_reason_path):
+        try:
+            Path(_current_exit_reason_path).write_text(
+                f"broken_gen: safety timeout reached ({_SAFETY_TIMEOUT_S:.0f}s) — process killed by orchestrator"
+            )
+        except Exception:
+            pass
     _kill_current_proc()
     _run_final_private_scores()
     logging.shutdown()
@@ -966,8 +982,10 @@ while True:
         python_exec = os.path.join(venv_dir, "bin", "python")
         state_file                 = os.path.join(current_gen_directory, "state.json")
         workspace_dir              = os.path.join(current_gen_directory, "workspace")
+        global _current_exit_reason_path
         solutions_dir_ta           = os.path.join(current_gen_directory, "solutions")
         exit_reason_path_ta        = os.path.join(current_gen_directory, "exit_reason.txt")
+        _current_exit_reason_path  = exit_reason_path_ta  # expose to signal handler
         agent_execution_path_ta    = os.path.join(current_gen_directory, "agent_execution.json")
         supervision_log_path_ta    = os.path.join(current_gen_directory, "supervision_log.txt")
         task_model_logs_dir_ta     = os.path.join(current_gen_directory, "task_model_logs")
@@ -1050,13 +1068,31 @@ while True:
     generation_duration = time.time() - generation_start_time
 
     # ── Ensure exit_reason.txt exists ────────────────────────────────────────
+    _current_exit_reason_path = None  # gen is done, signal handler no longer needs it
     _exit_reason_path = os.path.join(current_gen_directory, "exit_reason.txt")
     if not os.path.exists(_exit_reason_path):
-        _fallback_reason = (
-            "broken_gen: no exit_reason.txt written (process killed or crashed without cleanup)"
-            if not target_agent_success
-            else "evolve: target agent completed without writing exit_reason.txt"
-        )
+        if not target_agent_success:
+            rc = return_code if isinstance(return_code, int) else "?"
+            sig = ""
+            if isinstance(rc, int) and rc < 0:
+                import signal as _sig
+                try:
+                    sig = f" ({_sig.Signals(-rc).name})"
+                except ValueError:
+                    sig = f" (signal {-rc})"
+            log_tail = ""
+            try:
+                lines = target_agent_stdout.strip().splitlines()
+                if lines:
+                    log_tail = "\nLast log lines:\n" + "\n".join(lines[-6:])
+            except Exception:
+                pass
+            _fallback_reason = (
+                f"broken_gen: process exited with code {rc}{sig} without writing exit_reason.txt"
+                f"{log_tail}"
+            )
+        else:
+            _fallback_reason = "evolve: target agent completed without writing exit_reason.txt"
         Path(_exit_reason_path).write_text(_fallback_reason)
         logger.warning(f"  ⚠ exit_reason.txt missing — wrote fallback: {_fallback_reason}")
 
