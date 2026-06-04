@@ -113,6 +113,12 @@ def score_solution(solution_path: str) -> dict:
     if not os.path.exists(solution_path):
         return {"error": f"File not found: {solution_path}", "score": 0.0}
 
+    for _attempt in range(4):
+        if torch.cuda.is_available():
+            break
+        if _attempt < 3:
+            import time as _time
+            _time.sleep(10)
     if not torch.cuda.is_available():
         return {"error": "CUDA not available", "score": 0.0}
 
@@ -207,6 +213,8 @@ def main():
         display = {k: v for k, v in result.items() if k != "solution_code"}
         print(json.dumps(display, indent=2))
         print(f"\nGeometric mean speedup: {result['score']:.4f}x")
+        with open("private_result.json", "w") as f:
+            json.dump(display, f, indent=2)
 
 
 if __name__ == "__main__":

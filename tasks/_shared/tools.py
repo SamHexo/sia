@@ -118,9 +118,11 @@ def submit_solution(
         return _json.dumps({"error": f"Failed to write solution: {e}", "score": None, "uid": uid})
 
     try:
+        _env = os.environ.copy()
+        _env.setdefault("CUDA_VISIBLE_DEVICES", "0")
         proc = subprocess.run(
             [_sys.executable, evaluate_path, sol_path],
-            capture_output=True, text=True, cwd=working_dir, timeout=300,
+            capture_output=True, text=True, cwd=working_dir, env=_env,
         )
         full_out = proc.stdout + (f"\n[stderr]\n{proc.stderr}" if proc.stderr else "")
     except Exception as e:

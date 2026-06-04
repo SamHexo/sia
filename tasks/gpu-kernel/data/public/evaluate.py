@@ -70,6 +70,12 @@ def benchmark_fn(fn, Z, warmup: int = 10, iters: int = 50) -> float:
 
 def run_evaluation(custom_kernel_fn) -> dict:
     import torch
+    import time as _time
+    for _attempt in range(4):
+        if torch.cuda.is_available():
+            break
+        if _attempt < 3:
+            _time.sleep(10)
     if not torch.cuda.is_available():
         return {
             "error": "CUDA not available — a GPU is required for kernel benchmarking",

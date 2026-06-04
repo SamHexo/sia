@@ -8,14 +8,14 @@ cd "${REPO_ROOT}"
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 RUN_ID=1
-EXP_DURATION_MIN=120              # total experiment budget; safety timeout = 1.3×
+EXP_DURATION_MIN=600              # total experiment budget; safety timeout = 1.3×
 GEN0_EVOLVE_DURATION_MIN=5        # gen-0 runs for this long before auto-EVOLVE (no LLM call)
 META_AGENT_MAX_TURNS=100          # turn budget for the meta-agent's own tool loop
 TASK_MODEL_TEMPERATURE=0.3
 META_MODEL="gemini/gemini-3.1-pro-preview"
 SUPERVISION_MODEL="gemini/gemini-3.1-pro-preview"
 SUPERVISION_INTERVAL=5
-SUPERVISION_CHECK_TIMEOUT_MIN=10
+SUPERVISION_CHECK_TIMEOUT_MIN=20
 TASK_MODEL="tinker://55bc74de-c858-54ce-9756-e6f54d7a5a8d:train:0/sampler_weights/000049"
 BACKEND="openhands"
 # Seed the gen-0 tree with the FP16 reference solution before the MCTS loop.

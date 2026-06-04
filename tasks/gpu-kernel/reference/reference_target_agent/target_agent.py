@@ -422,9 +422,11 @@ Dataset directory (read-only):           {dataset_dir}
             _shutil.copy2(args.seed_solution, seed_dest)
             logger.info(f"[seed] Evaluating reference solution → {seed_dest}")
             try:
+                _seed_env = os.environ.copy()
+                _seed_env.setdefault("CUDA_VISIBLE_DEVICES", "0")
                 proc = subprocess.run(
                     [sys.executable, evaluate_path, seed_dest],
-                    capture_output=True, text=True, cwd=working_dir, timeout=300,
+                    capture_output=True, text=True, cwd=working_dir, timeout=300, env=_seed_env,
                 )
                 full_out = proc.stdout + (f"\n[stderr]\n{proc.stderr}" if proc.stderr else "")
                 if "RESULT_JSON:" in full_out:
@@ -434,11 +436,14 @@ Dataset directory (read-only):           {dataset_dir}
                         node_id = _write_tree_node_util(args.state_file, seed_dest, seed_result, args.current_gen)
                         logger.info(f"[seed] Node written: {node_id}  score={seed_result['score']:.4f}")
                     else:
-                        logger.warning(f"[seed] Evaluation error: {seed_result.get('error')}")
+                        logger.error(f"[seed] Evaluation error: {seed_result.get('error')} — aborting run")
+                        sys.exit(1)
                 else:
-                    logger.warning(f"[seed] No RESULT_JSON in output — seed skipped")
+                    logger.error(f"[seed] No RESULT_JSON in output — aborting run")
+                    sys.exit(1)
             except Exception as _e:
-                logger.warning(f"[seed] Failed: {_e}")
+                logger.error(f"[seed] Failed: {_e} — aborting run")
+                sys.exit(1)
         else:
             logger.info("[seed] Tree already has nodes — skipping seed")
 
