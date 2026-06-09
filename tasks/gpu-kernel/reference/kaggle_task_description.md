@@ -6,23 +6,40 @@ GPUMode is an open community for GPU kernel development that hosts competitions 
 
 Each GPU architecture (NVIDIA H100, A100, B200, AMD MI300X) has its own leaderboard, since performant implementations differ across hardware. Submissions must pass correctness checks before runtime is measured.
 
-Your submission is a single Python file containing a `trimul(Z)` function. You develop and profile it against an H100 benchmark. The evaluation runs on a fixed set of input shapes and reports the median runtime.
+Your submission is a single Python file containing a `custom_kernel(data)` function. You develop and profile it against an H100 benchmark. The evaluation runs on a fixed set of input shapes and reports the median runtime.
 
 ## The Operation
 
-The TriMul primitive computes a triangular multiplicative update on pair representations from AlphaFold2. Given a tensor `Z` of shape `(N, N, C)` representing pairwise features between sequence positions:
+The outgoing TriMul operator from AlphaFold-3, applied to batched pair representations. `custom_kernel` receives a single `data` tuple:
 
 ```
-Z_norm = LayerNorm(Z)                        # normalize along channel dim C
-a      = Z_norm ⊙ σ(Z_norm)                 # input gate A    — (N, N, C)
-b      = Z_norm ⊙ σ(−Z_norm)               # input gate B    — (N, N, C)
-Y[i,j,c] = Σ_{k≤j} a[i,k,c] · b[j,k,c]    # upper-triangular matmul
-output = LayerNorm(Y) ⊙ σ(Z_norm)           # output gating   — (N, N, C)
+data = (inp, mask, weights, cfg)
+
+  inp     : Tensor[B, N, N, C]   float32 CUDA  — pair representation
+  mask    : Tensor[B, N, N]      float32 CUDA  — upper-triangular (1 = keep)
+  weights : dict of named fp32 parameter tensors
+  cfg     : {"dim": C, "hidden_dim": H, "nomask": bool}
 ```
 
-The operation is dominated by two distinct bottlenecks:
-- **Memory-bound elementwise ops**: the gating sequence (LayerNorm → sigmoid → multiply) reads and writes the full `(N, N, C)` tensor multiple times
-- **Compute-bound triangular matmul**: O(N³·C) complexity, amenable to tensor core acceleration
+The algorithm:
+
+```
+Z        = LayerNorm(inp, w=norm.weight, b=norm.bias)    # (B,N,N,C)
+left     = (Z @ left_proj.T)  ⊙ σ(Z @ left_gate.T)     # (B,N,N,H)  gated projection
+right    = (Z @ right_proj.T) ⊙ σ(Z @ right_gate.T)    # (B,N,N,H)
+out_gate = σ(Z @ out_gate.T)                             # (B,N,N,H)
+
+left  ⊙= mask   (broadcast over H)   # upper-tri mask on i,k plane
+right ⊙= mask                         # upper-tri mask on j,k plane
+
+hidden[b,h,i,j] = Σ_k left[b,h,i,k] · right[b,h,j,k]  # batched GEMM
+
+output = (LayerNorm(hidden, H) ⊙ out_gate) @ to_out.T   # (B,N,N,C)
+```
+
+The operation is dominated by two bottlenecks:
+- **Memory-bound elementwise ops**: LN, sigmoid, and gating each touch the full `(B, N, N, H)` tensor
+- **Compute-bound GEMM**: O(B·H·N²) with large N, amenable to tensor core acceleration in FP16
 
 ## Benchmark
 
@@ -70,23 +87,39 @@ The unoptimized PyTorch reference (equivalent to a naive first submission):
 ```python
 import torch
 import torch.nn.functional as F
+from typing import Tuple, Dict
 
-def trimul(Z: torch.Tensor) -> torch.Tensor:
-    N, _, C = Z.shape
-    Z_norm = F.layer_norm(Z, [C])
-    a = Z_norm * torch.sigmoid(Z_norm)
-    b = Z_norm * torch.sigmoid(-Z_norm)
-    a_perm = a.permute(2, 0, 1)
-    b_perm = b.permute(2, 1, 0)
-    Y = torch.bmm(a_perm, b_perm).permute(1, 2, 0)
-    mask = torch.triu(torch.ones(N, N, device=Z.device, dtype=Z.dtype))
-    Y = Y * mask.unsqueeze(-1)
-    g = torch.sigmoid(Z_norm)
-    Y_norm = F.layer_norm(Y, [C])
-    return Y_norm * g
+def custom_kernel(data: Tuple) -> torch.Tensor:
+    inp, mask, weights, cfg = data
+    dim, H = cfg["dim"], cfg["hidden_dim"]
+    nomask = cfg.get("nomask", True)
+    B, N, _, C = inp.shape
+
+    Z = F.layer_norm(inp, [C], weight=weights["norm.weight"], bias=weights["norm.bias"])
+
+    left  = (Z @ weights["left_proj.weight"].T)  * torch.sigmoid(Z @ weights["left_gate.weight"].T)
+    right = (Z @ weights["right_proj.weight"].T) * torch.sigmoid(Z @ weights["right_gate.weight"].T)
+    out_gate = torch.sigmoid(Z @ weights["out_gate.weight"].T)
+
+    left_bhnn  = left.permute(0, 3, 1, 2)
+    right_bhnn = right.permute(0, 3, 1, 2)
+    if not nomask and mask is not None:
+        left_bhnn  = left_bhnn  * mask.unsqueeze(1)
+        right_bhnn = right_bhnn * mask.unsqueeze(1)
+
+    left_mat  = left_bhnn.reshape(B * H, N, N)
+    right_mat = right_bhnn.reshape(B * H, N, N).transpose(1, 2)
+    hidden = torch.bmm(left_mat, right_mat).reshape(B, H, N, N)
+
+    hidden_flat = hidden.permute(0, 2, 3, 1).reshape(-1, H)
+    hidden_norm = F.layer_norm(hidden_flat, [H],
+                               weight=weights["to_out_norm.weight"],
+                               bias=weights["to_out_norm.bias"])
+    out = (hidden_norm * out_gate.reshape(-1, H)) @ weights["to_out.weight"].T
+    return out.reshape(B, N, N, C)
 ```
 
-This baseline launches ~10 separate CUDA kernels and runs the matmul in FP32, leaving substantial room for improvement.
+This baseline launches many separate CUDA kernels and runs the GEMM in FP32, leaving substantial room for improvement.
 
 **Your goal is to beat the best human submission (1,371 µs on H100).**  
 Scores above 2× speedup over the reference baseline are strong results. The TTT-Discover kernel achieves ~3.6× speedup over the unoptimized baseline.

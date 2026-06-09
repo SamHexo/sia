@@ -436,13 +436,19 @@ Dataset directory (read-only):           {dataset_dir}
                         node_id = _write_tree_node_util(args.state_file, seed_dest, seed_result, args.current_gen)
                         logger.info(f"[seed] Node written: {node_id}  score={seed_result['score']:.4f}")
                     else:
-                        logger.error(f"[seed] Evaluation error: {seed_result.get('error')} — aborting run")
+                        _msg = f"fatal: seed evaluation error — {seed_result.get('error')}"
+                        logger.error(f"[seed] {_msg}")
+                        Path(exit_reason_path).write_text(_msg)
                         sys.exit(1)
                 else:
-                    logger.error(f"[seed] No RESULT_JSON in output — aborting run")
+                    _msg = "fatal: seed evaluation produced no RESULT_JSON"
+                    logger.error(f"[seed] {_msg}")
+                    Path(exit_reason_path).write_text(_msg)
                     sys.exit(1)
             except Exception as _e:
-                logger.error(f"[seed] Failed: {_e} — aborting run")
+                _msg = f"fatal: seed evaluation exception — {_e}"
+                logger.error(f"[seed] {_msg}")
+                Path(exit_reason_path).write_text(_msg)
                 sys.exit(1)
         else:
             logger.info("[seed] Tree already has nodes — skipping seed")

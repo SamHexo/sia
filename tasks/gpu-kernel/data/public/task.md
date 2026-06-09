@@ -6,51 +6,88 @@ Your task is to write an optimized implementation of the `custom_kernel` functio
 
 ## Operation
 
-Given a pair representation tensor `Z` of shape `(N, N, C)`, the TriMul operation computes a triangular multiplicative update:
+The outgoing TriMul operator from AlphaFold-3. Given a packed `data` tuple, the operation applies learnable projections, gating, a batched triangular matrix multiplication, and a fused output projection:
 
 ```python
 import torch
 import torch.nn.functional as F
+from typing import Tuple, Dict
 
-def custom_kernel_reference(Z: torch.Tensor) -> torch.Tensor:
+def custom_kernel_reference(data: Tuple) -> torch.Tensor:
     """Unoptimized reference implementation — your starting baseline."""
-    N, _, C = Z.shape
+    inp, mask, weights, cfg = data
+    # inp     : Tensor[B, N, N, C]  float32 CUDA
+    # mask    : Tensor[B, N, N]     float32 CUDA  (upper-triangular, 1 = keep)
+    # weights : dict of named fp32 parameters (see below)
+    # cfg     : {"dim": C, "hidden_dim": H, "nomask": bool}
 
-    # Input LayerNorm
-    Z_norm = F.layer_norm(Z, [C])
+    dim        = cfg["dim"]        # C — input/output channel count
+    hidden_dim = cfg["hidden_dim"] # H — intermediate projection size
+    nomask     = cfg.get("nomask", True)
+    B, N, _, C = inp.shape
 
-    # Input gating (memory-bound: 3 separate kernel launches)
-    a = Z_norm * torch.sigmoid(Z_norm)     # (N, N, C)
-    b = Z_norm * torch.sigmoid(-Z_norm)    # (N, N, C)
+    # 1. Input LayerNorm (learned scale/bias)
+    Z = F.layer_norm(inp, [C], weight=weights["norm.weight"], bias=weights["norm.bias"])
 
-    # Triangular matmul: Y[i,j,c] = sum_{k<=j} a[i,k,c] * b[j,k,c]
-    # Equivalent to batched matmul per channel, then upper-triangular mask
-    a_perm = a.permute(2, 0, 1)   # (C, N, N)
-    b_perm = b.permute(2, 1, 0)   # (C, N, N)
-    Y = torch.bmm(a_perm, b_perm).permute(1, 2, 0)  # (N, N, C)
+    # 2. Gated linear projections: (B, N, N, C) → (B, N, N, H)
+    left  = (Z @ weights["left_proj.weight"].T)  * torch.sigmoid(Z @ weights["left_gate.weight"].T)
+    right = (Z @ weights["right_proj.weight"].T) * torch.sigmoid(Z @ weights["right_gate.weight"].T)
+    out_gate = torch.sigmoid(Z @ weights["out_gate.weight"].T)
 
-    # Upper triangular mask (sets k > j entries to 0)
-    mask = torch.triu(torch.ones(N, N, device=Z.device, dtype=Z.dtype))
-    Y = Y * mask.unsqueeze(-1)
+    # 3. Optional triangular mask applied to both left and right
+    left_bhnn  = left.permute(0, 3, 1, 2)   # (B, H, N, N)
+    right_bhnn = right.permute(0, 3, 1, 2)  # (B, H, N, N)
+    if not nomask and mask is not None:
+        left_bhnn  = left_bhnn  * mask.unsqueeze(1)
+        right_bhnn = right_bhnn * mask.unsqueeze(1)
 
-    # Output gating with LayerNorm (another 3 kernel launches)
-    g = torch.sigmoid(Z_norm)
-    Y_norm = F.layer_norm(Y, [C])
+    # 4. Batched GEMM: hidden[b,h,i,j] = Σ_k left[b,h,i,k] * right[b,h,j,k]
+    left_mat  = left_bhnn.reshape(B * hidden_dim, N, N)
+    right_mat = right_bhnn.reshape(B * hidden_dim, N, N).transpose(1, 2)
+    hidden = torch.bmm(left_mat, right_mat).reshape(B, hidden_dim, N, N)
 
-    return Y_norm * g
+    # 5. Output LayerNorm + gating + linear projection → (B, N, N, C)
+    hidden_flat = hidden.permute(0, 2, 3, 1).reshape(-1, hidden_dim)
+    hidden_norm = F.layer_norm(hidden_flat, [hidden_dim],
+                               weight=weights["to_out_norm.weight"],
+                               bias=weights["to_out_norm.bias"])
+    out = (hidden_norm * out_gate.reshape(-1, hidden_dim)) @ weights["to_out.weight"].T
+    return out.reshape(B, N, N, C)
 ```
+
+### `weights` dict keys
+
+| Key | Shape | Description |
+|-----|-------|-------------|
+| `norm.weight` | `(C,)` | Input LayerNorm scale |
+| `norm.bias` | `(C,)` | Input LayerNorm bias |
+| `left_proj.weight` | `(H, C)` | Left projection |
+| `left_gate.weight` | `(H, C)` | Left gate |
+| `right_proj.weight` | `(H, C)` | Right projection |
+| `right_gate.weight` | `(H, C)` | Right gate |
+| `out_gate.weight` | `(H, C)` | Output gate |
+| `to_out_norm.weight` | `(H,)` | Output LayerNorm scale |
+| `to_out_norm.bias` | `(H,)` | Output LayerNorm bias |
+| `to_out.weight` | `(C, H)` | Output linear projection |
 
 ## Function Signature
 
 ```python
-def custom_kernel(Z: torch.Tensor) -> torch.Tensor:
+from typing import Tuple, Dict
+import torch
+
+def custom_kernel(data: Tuple[torch.Tensor, torch.Tensor, Dict[str, torch.Tensor], Dict]) -> torch.Tensor:
     """
-    Optimized triangular matrix multiplication.
+    Optimized outgoing TriMul operator.
 
     Args:
-        Z: float32 CUDA tensor of shape (N, N, C)
+        data: tuple (inp, mask, weights, cfg) where
+            inp     : float32 CUDA tensor of shape (B, N, N, C)
+            mask    : float32 CUDA tensor of shape (B, N, N)  — upper-triangular
+            weights : dict of named fp32 parameter tensors (see task.md)
+            cfg     : dict with keys 'dim' (C), 'hidden_dim' (H), 'nomask' (bool)
     Returns:
-        float32 CUDA tensor of shape (N, N, C)
+        float32 CUDA tensor of shape (B, N, N, C)
     """
 ```
 
@@ -68,13 +105,13 @@ A solution running at the same speed as the reference scores 1.0. A 3× speedup 
 
 ## Rules
 
-1. Write `solution.py` containing your `custom_kernel(Z)` function
+1. Write `solution.py` containing your `custom_kernel(data)` function
 2. Evaluate using `python {dataset_dir}/evaluate.py solution.py`
 3. After each evaluation, `results.json` is written to your working directory — do not write it yourself
 4. At the end of your run, your working directory **must** contain `solution.py`
 5. No side effects inside `custom_kernel`: no file I/O, no print statements, no global state mutation between calls
 6. Output must match the reference numerically (atol=1e-2, rtol=1e-2 in float32)
-7. The function must handle any (N, N, C) shape, not just the benchmark shape
+7. The function must handle any `(B, N, N, C)` shape, not just the benchmark shape
 
 ## Available Libraries
 
@@ -106,7 +143,7 @@ The reference has several bottlenecks to attack:
 # Quick profiling with torch.profiler
 from torch.profiler import profile, ProfilerActivity
 with profile(activities=[ProfilerActivity.CUDA]) as prof:
-    custom_kernel(Z)
+    custom_kernel(data)  # data = (inp, mask, weights, cfg)
 print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 ```
 
@@ -130,5 +167,5 @@ python {dataset_dir}/evaluate.py solution.py
 
 ## Generalization
 
-The development benchmark uses N=256, C=128. The private score averages over multiple shapes:
-`N ∈ {128, 192, 256, 320, 384}` with `C=128`. Solutions that hardcode tile sizes or assume a specific N will generalize poorly.
+The development benchmark uses `B=1, N=256, C=H=128`. The private score averages over multiple shapes:
+`N ∈ {128, 192, 256, 320, 384}` with `B=C=H=128`. Solutions that hardcode tile sizes or assume a specific N will generalize poorly.

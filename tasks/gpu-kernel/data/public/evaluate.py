@@ -5,7 +5,13 @@ Evaluate a custom_kernel solution against the TriMul benchmark.
 Usage:
     python evaluate.py solution.py
 
-The solution.py must define a top-level `custom_kernel(Z)` function.
+The solution.py must define a top-level `custom_kernel(data)` function where
+data = (inp, mask, weights, cfg):
+  - inp     : Tensor[B, N, N, C]  float32 CUDA
+  - mask    : Tensor[B, N, N]     float32 CUDA  (upper-triangular)
+  - weights : dict of named fp32 parameters
+  - cfg     : dict with keys 'dim' (C), 'hidden_dim' (H), 'nomask' (bool)
+
 Outputs results.json next to solution.py.
 """
 
@@ -18,11 +24,33 @@ import traceback
 from pathlib import Path
 
 # Development benchmark: single shape
-BENCHMARK_SHAPE = (256, 256, 128)  # (N, N, C)
+N, C, H, B = 256, 128, 128, 1
 WARMUP_ITERS = 10
 BENCH_ITERS = 50
 CORRECTNESS_ATOL = 1e-2
 CORRECTNESS_RTOL = 1e-2
+
+
+def make_data(N, C, H=128, B=1, device="cuda", seed=42):
+    """Build the (inp, mask, weights, cfg) tuple used by custom_kernel."""
+    import torch
+    torch.manual_seed(seed)
+    inp = torch.randn(B, N, N, C, device=device, dtype=torch.float32)
+    mask = torch.triu(torch.ones(B, N, N, device=device, dtype=torch.float32))
+    weights = {
+        "norm.weight":       torch.ones(C, device=device, dtype=torch.float32),
+        "norm.bias":         torch.zeros(C, device=device, dtype=torch.float32),
+        "left_proj.weight":  torch.randn(H, C, device=device, dtype=torch.float32) * 0.02,
+        "right_proj.weight": torch.randn(H, C, device=device, dtype=torch.float32) * 0.02,
+        "left_gate.weight":  torch.randn(H, C, device=device, dtype=torch.float32) * 0.02,
+        "right_gate.weight": torch.randn(H, C, device=device, dtype=torch.float32) * 0.02,
+        "out_gate.weight":   torch.randn(H, C, device=device, dtype=torch.float32) * 0.02,
+        "to_out_norm.weight": torch.ones(H, device=device, dtype=torch.float32),
+        "to_out_norm.bias":   torch.zeros(H, device=device, dtype=torch.float32),
+        "to_out.weight":     torch.randn(C, H, device=device, dtype=torch.float32) * 0.02,
+    }
+    cfg = {"dim": C, "hidden_dim": H, "nomask": False}
+    return inp, mask, weights, cfg
 
 
 def load_solution(solution_path: str):
@@ -30,38 +58,57 @@ def load_solution(solution_path: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     if not hasattr(module, "custom_kernel"):
-        raise AttributeError(f"solution.py must define custom_kernel(Z), not found in {solution_path}")
+        raise AttributeError(f"solution.py must define custom_kernel(data), not found in {solution_path}")
     return module.custom_kernel
 
 
-def reference_custom_kernel(Z):
+def reference_custom_kernel(data):
     import torch
     import torch.nn.functional as F
-    N, _, C = Z.shape
-    Z_norm = F.layer_norm(Z, [C])
-    a = Z_norm * torch.sigmoid(Z_norm)
-    b = Z_norm * torch.sigmoid(-Z_norm)
-    a_perm = a.permute(2, 0, 1)
-    b_perm = b.permute(2, 1, 0)
-    Y = torch.bmm(a_perm, b_perm).permute(1, 2, 0)
-    mask = torch.triu(torch.ones(N, N, device=Z.device, dtype=Z.dtype))
-    Y = Y * mask.unsqueeze(-1)
-    g = torch.sigmoid(Z_norm)
-    Y_norm = F.layer_norm(Y, [C])
-    return Y_norm * g
+    inp, mask, weights, cfg = data
+    dim = cfg["dim"]
+    hidden_dim = cfg["hidden_dim"]
+    nomask = cfg.get("nomask", True)
+    B, N, _, C = inp.shape
+
+    Z_norm = F.layer_norm(inp, [C],
+                          weight=weights["norm.weight"],
+                          bias=weights["norm.bias"])
+
+    left = (Z_norm @ weights["left_proj.weight"].T) * torch.sigmoid(Z_norm @ weights["left_gate.weight"].T)
+    right = (Z_norm @ weights["right_proj.weight"].T) * torch.sigmoid(Z_norm @ weights["right_gate.weight"].T)
+    out_gate = torch.sigmoid(Z_norm @ weights["out_gate.weight"].T)
+
+    left_bhnn = left.permute(0, 3, 1, 2)    # (B, H, N, N)
+    right_bhnn = right.permute(0, 3, 1, 2)  # (B, H, N, N)
+
+    if not nomask and mask is not None:
+        left_bhnn  = left_bhnn  * mask.unsqueeze(1)
+        right_bhnn = right_bhnn * mask.unsqueeze(1)
+
+    left_mat = left_bhnn.reshape(B * hidden_dim, N, N)
+    right_mat = right_bhnn.reshape(B * hidden_dim, N, N).transpose(1, 2)
+    hidden = torch.bmm(left_mat, right_mat).reshape(B, hidden_dim, N, N)
+
+    hidden_flat = hidden.permute(0, 2, 3, 1).reshape(-1, hidden_dim)
+    hidden_norm = F.layer_norm(hidden_flat, [hidden_dim],
+                               weight=weights["to_out_norm.weight"],
+                               bias=weights["to_out_norm.bias"])
+    out = (hidden_norm * out_gate.reshape(-1, hidden_dim)) @ weights["to_out.weight"].T
+    return out.reshape(B, N, N, C)
 
 
-def benchmark_fn(fn, Z, warmup: int = 10, iters: int = 50) -> float:
+def benchmark_fn(fn, data, warmup: int = 10, iters: int = 50) -> float:
     """Returns median runtime in milliseconds."""
     import torch
     for _ in range(warmup):
-        fn(Z)
+        fn(data)
         torch.cuda.synchronize()
     times = []
     for _ in range(iters):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        fn(Z)
+        fn(data)
         torch.cuda.synchronize()
         times.append(time.perf_counter() - t0)
     times.sort()
@@ -82,22 +129,20 @@ def run_evaluation(custom_kernel_fn) -> dict:
             "score": 0.0,
         }
 
-    N, _, C = BENCHMARK_SHAPE
-    torch.manual_seed(42)
-    Z = torch.randn(*BENCHMARK_SHAPE, device="cuda", dtype=torch.float32)
-
-    print(f"Shape: {tuple(Z.shape)}  device: {Z.device}", flush=True)
+    data = make_data(N, C, H, B, device="cuda")
+    inp = data[0]
+    print(f"Shape: inp={tuple(inp.shape)}  hidden_dim={H}  device={inp.device}", flush=True)
 
     # Reference run (establishes baseline time)
     print("Benchmarking reference implementation...", flush=True)
-    ref_time_ms = benchmark_fn(reference_custom_kernel, Z, WARMUP_ITERS, BENCH_ITERS)
-    ref_out = reference_custom_kernel(Z).float()
+    ref_time_ms = benchmark_fn(reference_custom_kernel, data, WARMUP_ITERS, BENCH_ITERS)
+    ref_out = reference_custom_kernel(data).float()
     print(f"Reference: {ref_time_ms:.3f} ms", flush=True)
 
     # Correctness check
     print("Running correctness check...", flush=True)
     try:
-        sol_out = custom_kernel_fn(Z.clone()).float()
+        sol_out = custom_kernel_fn(data).float()
     except Exception as e:
         return {"error": f"custom_kernel() raised an exception: {e}\n{traceback.format_exc()}", "score": 0.0}
 
@@ -122,7 +167,7 @@ def run_evaluation(custom_kernel_fn) -> dict:
 
     # Solution benchmark
     print("Benchmarking solution...", flush=True)
-    sol_time_ms = benchmark_fn(custom_kernel_fn, Z.clone(), WARMUP_ITERS, BENCH_ITERS)
+    sol_time_ms = benchmark_fn(custom_kernel_fn, data, WARMUP_ITERS, BENCH_ITERS)
     print(f"Solution:  {sol_time_ms:.3f} ms", flush=True)
 
     speedup = ref_time_ms / sol_time_ms
@@ -163,7 +208,6 @@ def main():
     result["accuracy"] = result.get("score", 0.0)
     result["lower_is_better"] = False
 
-    # Print without solution_code (too large)
     display = {k: v for k, v in result.items() if k != "solution_code"}
     print("\n=== EVALUATION RESULT ===")
     print(json.dumps(display, indent=2))

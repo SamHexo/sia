@@ -180,7 +180,7 @@ def _proj_gate_mask_kernel(
             x_ptr + rows[:, None] * C + cur_k[None, :],
             mask=row_mask[:, None] & k_mask[None, :],
             other=0.0,
-        ).to(tl.float32)                      # (BLOCK_M, BLOCK_K)
+        ).to(tl.float16)                      # (BLOCK_M, BLOCK_K) – fp16 for tl.dot with fp16 weights
 
         # weight tiles (C, H) – column‑major layout
         w_lp = tl.load(

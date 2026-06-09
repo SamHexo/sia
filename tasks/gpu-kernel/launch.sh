@@ -15,7 +15,7 @@ TASK_MODEL_TEMPERATURE=0.3
 META_MODEL="gemini/gemini-3.1-pro-preview"
 SUPERVISION_MODEL="gemini/gemini-3.1-pro-preview"
 SUPERVISION_INTERVAL=5
-SUPERVISION_CHECK_TIMEOUT_MIN=20
+SUPERVISION_CHECK_TIMEOUT_MIN=25
 TASK_MODEL="tinker://55bc74de-c858-54ce-9756-e6f54d7a5a8d:train:0/sampler_weights/000049"
 BACKEND="openhands"
 # Seed the gen-0 tree with the FP16 reference solution before the MCTS loop.

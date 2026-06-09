@@ -91,7 +91,7 @@ logger = logging.getLogger(__name__)
 # ========================
 
 _current_proc: "subprocess.Popen | None" = None
-_current_exit_reason_path: "str | None" = None  # updated each gen so signal handler can write it
+_current_exit_reason_path = None  # str | None — updated each gen so signal handler can write it
 
 
 def _kill_proc(proc) -> None:
@@ -982,7 +982,6 @@ while True:
         python_exec = os.path.join(venv_dir, "bin", "python")
         state_file                 = os.path.join(current_gen_directory, "state.json")
         workspace_dir              = os.path.join(current_gen_directory, "workspace")
-        global _current_exit_reason_path
         solutions_dir_ta           = os.path.join(current_gen_directory, "solutions")
         exit_reason_path_ta        = os.path.join(current_gen_directory, "exit_reason.txt")
         _current_exit_reason_path  = exit_reason_path_ta  # expose to signal handler
@@ -1114,14 +1113,14 @@ while True:
         # Format: "STATUS: reason" — extract the keyword before the colon
         exit_status = exit_reason.split(":")[0].strip()
         logger.info(f"  Exit reason: {exit_reason}")
-        if exit_status == "stop":
+        if exit_status in ("stop", "fatal"):
             should_stop_run = True
         elif exit_status == "broken_gen":
             should_broken_gen = True
         # "evolve" = gen completed its budget normally; proceed to meta-agent
 
     if should_stop_run:
-        logger.info("  → stop: terminating run.")
+        logger.info(f"  → {exit_status}: terminating run.")
         break
 
     if should_broken_gen and current_gen > 0:

@@ -3,8 +3,8 @@
 Private evaluator for the gpu-kernel task.
 
 Evaluates solutions over multiple shapes to measure generalization across
-matrix sizes. The development benchmark uses a single shape (N=256, C=128);
-this private evaluator tests N ∈ {128, 192, 256, 320, 384} with C=128.
+matrix sizes. The development benchmark uses a single shape (B=1, N=256, C=128, H=128);
+this private evaluator tests N ∈ {128, 192, 256, 320, 384} with C=H=128, B=1.
 
 Usage:
     python evaluate.py --gen-dir runs/run_1/gen_3
@@ -22,17 +22,34 @@ import importlib.util
 import traceback
 from pathlib import Path
 
-BENCHMARK_SHAPES = [
-    (128, 128, 128),
-    (192, 192, 128),
-    (256, 256, 128),
-    (320, 320, 128),
-    (384, 384, 128),
-]
+C, H, B = 128, 128, 1
+BENCHMARK_NS = [128, 192, 256, 320, 384]
 WARMUP_ITERS = 10
 BENCH_ITERS = 50
 CORRECTNESS_ATOL = 1e-2
 CORRECTNESS_RTOL = 1e-2
+
+
+def make_data(N, C, H=128, B=1, device="cuda", seed=42):
+    """Build the (inp, mask, weights, cfg) tuple used by custom_kernel."""
+    import torch
+    torch.manual_seed(seed)
+    inp = torch.randn(B, N, N, C, device=device, dtype=torch.float32)
+    mask = torch.triu(torch.ones(B, N, N, device=device, dtype=torch.float32))
+    weights = {
+        "norm.weight":       torch.ones(C, device=device, dtype=torch.float32),
+        "norm.bias":         torch.zeros(C, device=device, dtype=torch.float32),
+        "left_proj.weight":  torch.randn(H, C, device=device, dtype=torch.float32) * 0.02,
+        "right_proj.weight": torch.randn(H, C, device=device, dtype=torch.float32) * 0.02,
+        "left_gate.weight":  torch.randn(H, C, device=device, dtype=torch.float32) * 0.02,
+        "right_gate.weight": torch.randn(H, C, device=device, dtype=torch.float32) * 0.02,
+        "out_gate.weight":   torch.randn(H, C, device=device, dtype=torch.float32) * 0.02,
+        "to_out_norm.weight": torch.ones(H, device=device, dtype=torch.float32),
+        "to_out_norm.bias":   torch.zeros(H, device=device, dtype=torch.float32),
+        "to_out.weight":     torch.randn(C, H, device=device, dtype=torch.float32) * 0.02,
+    }
+    cfg = {"dim": C, "hidden_dim": H, "nomask": False}
+    return inp, mask, weights, cfg
 
 
 def load_solution(solution_path: str):
@@ -40,54 +57,70 @@ def load_solution(solution_path: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     if not hasattr(module, "custom_kernel"):
-        raise AttributeError("solution.py must define custom_kernel(Z)")
+        raise AttributeError("solution.py must define custom_kernel(data)")
     return module.custom_kernel
 
 
-def reference_custom_kernel(Z):
+def reference_custom_kernel(data):
     import torch
     import torch.nn.functional as F
-    N, _, C = Z.shape
-    Z_norm = F.layer_norm(Z, [C])
-    a = Z_norm * torch.sigmoid(Z_norm)
-    b = Z_norm * torch.sigmoid(-Z_norm)
-    a_perm = a.permute(2, 0, 1)
-    b_perm = b.permute(2, 1, 0)
-    Y = torch.bmm(a_perm, b_perm).permute(1, 2, 0)
-    mask = torch.triu(torch.ones(N, N, device=Z.device, dtype=Z.dtype))
-    Y = Y * mask.unsqueeze(-1)
-    g = torch.sigmoid(Z_norm)
-    Y_norm = F.layer_norm(Y, [C])
-    return Y_norm * g
+    inp, mask, weights, cfg = data
+    dim = cfg["dim"]
+    hidden_dim = cfg["hidden_dim"]
+    nomask = cfg.get("nomask", True)
+    B, N, _, C = inp.shape
+
+    Z_norm = F.layer_norm(inp, [C],
+                          weight=weights["norm.weight"],
+                          bias=weights["norm.bias"])
+
+    left = (Z_norm @ weights["left_proj.weight"].T) * torch.sigmoid(Z_norm @ weights["left_gate.weight"].T)
+    right = (Z_norm @ weights["right_proj.weight"].T) * torch.sigmoid(Z_norm @ weights["right_gate.weight"].T)
+    out_gate = torch.sigmoid(Z_norm @ weights["out_gate.weight"].T)
+
+    left_bhnn = left.permute(0, 3, 1, 2)    # (B, H, N, N)
+    right_bhnn = right.permute(0, 3, 1, 2)  # (B, H, N, N)
+
+    if not nomask and mask is not None:
+        left_bhnn  = left_bhnn  * mask.unsqueeze(1)
+        right_bhnn = right_bhnn * mask.unsqueeze(1)
+
+    left_mat = left_bhnn.reshape(B * hidden_dim, N, N)
+    right_mat = right_bhnn.reshape(B * hidden_dim, N, N).transpose(1, 2)
+    hidden = torch.bmm(left_mat, right_mat).reshape(B, hidden_dim, N, N)
+
+    hidden_flat = hidden.permute(0, 2, 3, 1).reshape(-1, hidden_dim)
+    hidden_norm = F.layer_norm(hidden_flat, [hidden_dim],
+                               weight=weights["to_out_norm.weight"],
+                               bias=weights["to_out_norm.bias"])
+    out = (hidden_norm * out_gate.reshape(-1, hidden_dim)) @ weights["to_out.weight"].T
+    return out.reshape(B, N, N, C)
 
 
-def benchmark_fn(fn, Z, warmup: int = 10, iters: int = 50) -> float:
+def benchmark_fn(fn, data, warmup: int = 10, iters: int = 50) -> float:
     import torch
     for _ in range(warmup):
-        fn(Z)
+        fn(data)
         torch.cuda.synchronize()
     times = []
     for _ in range(iters):
         torch.cuda.synchronize()
         t0 = time.perf_counter()
-        fn(Z)
+        fn(data)
         torch.cuda.synchronize()
         times.append(time.perf_counter() - t0)
     times.sort()
     return times[len(times) // 2] * 1000.0
 
 
-def evaluate_on_shape(custom_kernel_fn, shape: tuple) -> dict:
+def evaluate_on_shape(custom_kernel_fn, N) -> dict:
     import torch
-    N, _, C = shape
-    torch.manual_seed(42)
-    Z = torch.randn(*shape, device="cuda", dtype=torch.float32)
-    label = f"N={N},C={C}"
+    label = f"N={N},C={C},H={H}"
+    data = make_data(N, C, H, B, device="cuda")
 
-    # Correctness
-    ref_out = reference_custom_kernel(Z).float()
+    ref_out = reference_custom_kernel(data).float()
     try:
-        sol_out = custom_kernel_fn(Z.clone()).float()
+        sol_out = custom_kernel_fn(data).float()
     except Exception as e:
         return {"error": f"[{label}] custom_kernel() raised: {e}", "speedup": 0.0}
 
@@ -99,8 +132,8 @@ def evaluate_on_shape(custom_kernel_fn, shape: tuple) -> dict:
         max_diff = (ref_out - sol_out).abs().max().item()
         return {"error": f"[{label}] Correctness failed: max_diff={max_diff:.6f}", "speedup": 0.0}
 
-    ref_ms = benchmark_fn(reference_custom_kernel, Z, WARMUP_ITERS, BENCH_ITERS)
-    sol_ms = benchmark_fn(custom_kernel_fn, Z.clone(), WARMUP_ITERS, BENCH_ITERS)
+    ref_ms = benchmark_fn(reference_custom_kernel, data, WARMUP_ITERS, BENCH_ITERS)
+    sol_ms = benchmark_fn(custom_kernel_fn, data, WARMUP_ITERS, BENCH_ITERS)
     speedup = ref_ms / sol_ms
 
     print(f"  [{label}] ref={ref_ms:.3f}ms  sol={sol_ms:.3f}ms  speedup={speedup:.2f}x", flush=True)
@@ -128,9 +161,9 @@ def score_solution(solution_path: str) -> dict:
         return {"error": f"Failed to load solution: {e}", "score": 0.0}
 
     per_shape = {}
-    for shape in BENCHMARK_SHAPES:
-        label = f"{shape[0]}x{shape[1]}x{shape[2]}"
-        per_shape[label] = evaluate_on_shape(custom_kernel_fn, shape)
+    for n in BENCHMARK_NS:
+        label = f"{n}x{n}x{C}"
+        per_shape[label] = evaluate_on_shape(custom_kernel_fn, n)
 
     valid_speedups = [r["speedup"] for r in per_shape.values() if r.get("error") is None and r.get("speedup", 0) > 0]
 
@@ -139,10 +172,9 @@ def score_solution(solution_path: str) -> dict:
         error = "All shapes failed"
     else:
         import math
-        # Geometric mean of speedups (consistent with paper's reward = 1/geomean(runtimes))
         log_sum = sum(math.log(s) for s in valid_speedups)
         avg_speedup = math.exp(log_sum / len(valid_speedups))
-        error = None if len(valid_speedups) == len(BENCHMARK_SHAPES) else f"Only {len(valid_speedups)}/{len(BENCHMARK_SHAPES)} shapes succeeded"
+        error = None if len(valid_speedups) == len(BENCHMARK_NS) else f"Only {len(valid_speedups)}/{len(BENCHMARK_NS)} shapes succeeded"
 
     try:
         with open(solution_path) as f:
