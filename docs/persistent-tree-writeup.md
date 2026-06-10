@@ -14,10 +14,10 @@ The core question before building a self-improving agent: **what do you want at 
 
 For a fixed budget — say 10 hours — consider two options:
 
-- 10 generations × 1h each, restarting from zero. By gen 10, the scaffold is good. But it only runs for 1 hour.
-- 1 generation × 10h with a persistent tree. The scaffold never improves. But the tree keeps growing for 10 hours.
+- 10 generations × 1h each, restarting from zero. By gen 10, the scaffold is excellent. But it only runs for 1 hour.
+- 1 generation × 10h with a persistent tree. The scaffold never improves — it stays mediocre. But it runs for 10 hours.
 
-The second often wins, because a good node found in hour 2 becomes a parent for better mutations in hours 3–10. Restarts throw that compounding away.
+The second often produces a better final solution. A mediocre scaffold running for 10 hours will explore more of the space, compound on early good nodes, and accumulate more valid candidates than an excellent scaffold that only gets 1 hour. Restarts throw that compounding away.
 
 The real sweet spot: spend a few short generations improving the scaffold, then let a good generation run long. 9 gens × 1h + 1 gen × 10h will likely beat both extremes — and the persistent tree is what makes it possible, because the early short generations aren't wasted.
 
@@ -96,4 +96,4 @@ Task: maximize speedup ratio vs. PyTorch reference for AlphaFold-3 Outgoing TriM
 
 GPU kernels are a good fit: scores are deterministic, the search space is smooth, the artifact is a standalone file.
 
-GPQA-style benchmarks are harder. Scores are stochastic (averaged over many questions), dead ends are noisier (did this strategy fail, or was it just bad luck on these questions?), and the "solution" is a behavior entangled with the agent, not a separable file. The tree still makes sense in principle, but Q-values would need confidence intervals, and selection would need to account for noise. Whether that's worth the complexity over just keeping a persistent *memory* of what's been tried — without explicit PUCT — is an open question.
+Reasoning benchmarks like GPQA or LawBench are harder, for the same reasons. Scores are stochastic (averaged over many questions), dead ends are noisier (did this strategy fail, or was it just bad luck on these questions?), and the "solution" is a behavior entangled with the agent, not a separable file. The tree still makes sense in principle, but Q-values would need confidence intervals, and selection would need to account for noise. Whether that's worth the complexity over just keeping a persistent *memory* of what's been tried — without explicit PUCT — is an open question.
