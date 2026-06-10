@@ -22,6 +22,21 @@ In this mode, **restarting from zero is actively harmful**. Every generation tha
 
 Even restarting from the *best solution found so far* is problematic. You keep the local peak, but you lose all the branches that were promising-but-not-best, all the regions that turned out to be dead ends (so you don't explore them again), and all the variance information that tells you where the unexplored territory actually is. You're climbing from the summit of the last attempt with no memory of the mountain.
 
+### Nodes evaluated is the key metric — not scaffold quality
+
+There's a subtler implication that's easy to miss. Suppose you have a 10-hour compute budget and you're choosing between two strategies:
+
+- **Strategy A**: Run 10 independent 1-hour generations, each restarting from zero. Each generation has a highly optimized scaffold — clean prompts, smart heuristics, well-tuned LLM calls. By gen 10, the scaffold is excellent.
+- **Strategy B**: Run 10 hours with a persistent tree and a scaffold that starts mediocre. Each generation is given a chance to improve the search strategy, but the tree accumulates continuously.
+
+Strategy A sounds better. But consider what actually happens: each restart-from-zero generation spends its first N evaluations re-discovering the shape of the space, re-finding the good region, re-establishing a baseline. The total number of *distinct, non-redundant* nodes evaluated across 10 generations might be far less than it appears — a lot of compute goes into rediscovering what was already known.
+
+Strategy B's tree, even with an imperfect scaffold, keeps growing. Every node is new territory. By hour 10, the tree might have explored 3–5× more distinct regions of the solution space, even if no single generation was as polished as Strategy A's gen 10.
+
+**The intuition**: in a fixed compute budget, a slightly worse harness that explores 1000 nodes usually beats a better harness that explores 200. The number of evaluations compounds — a good node found in hour 2 becomes a parent that enables better mutations in hours 3–10. With restarts, that compounding resets each generation.
+
+This doesn't mean the scaffold quality is irrelevant. A scaffold that generates 80% broken nodes is burning most of its evaluations. But it means that *between a faster-iterating mediocre scaffold and a slower, more careful scaffold*, the fast one is often better — as long as the tree persists and compounding can happen.
+
 ---
 
 ## What persistent tree search actually means
