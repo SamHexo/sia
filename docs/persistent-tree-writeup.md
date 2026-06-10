@@ -1,35 +1,32 @@
-# SIA with Persistent Tree Search — or: why restarting from zero is a bad idea
+# SIA with Persistent Tree Search — the right artifact determines the right design
 
-Self-improving agents have a seductive loop: run → evaluate → rewrite → repeat. But most implementations share a hidden flaw — **each generation throws away everything the previous one learned about the search space**.
+Self-improving agents share a common loop: run → evaluate → rewrite → repeat. Simple and powerful. But before you build one, there's a question worth spending time on: **what is the artifact you actually want at the end?**
 
-This is a write-up about a different design, one where the search tree survives across generations, and what happens when you actually run it.
-
----
-
-## The problem with linear improvement
-
-A typical SIA loop looks like this:
-
-```
-Gen 0 → target_agent_v0.py  →  score: 6.37×
-           ↓ feedback
-Gen 1 → target_agent_v1.py  →  score: 6.61×
-           ↓ feedback
-Gen 2 → target_agent_v2.py  →  score: ???
-```
-
-The meta-agent reads the feedback from gen N and rewrites the target agent for gen N+1. Clean, simple. But notice what's gone: every candidate solution gen N explored, every dead end it hit, every promising branch it started — all erased. Gen N+1 starts from a blank tree.
-
-That means:
-- **Duplicate work**: gen N+1 will re-explore paths gen N already tried
-- **Lost diversity**: the new agent has no memory of which parts of the space are played out
-- **Context collapse**: the meta-agent writes a new agent based on *one* feedback summary, not the actual geometry of the search space
+The answer changes everything about how you should design the system.
 
 ---
 
-## The persistent tree design
+## Two modes, two designs
 
-The core idea is simple: **the search tree is the persistent artifact, not the agent code**.
+### Mode 1: the artifact is the agent
+
+Imagine you're building an agent that reviews ML papers, or one that solves agentic coding tasks. You run it on a benchmark, get a score, improve it, repeat. After 20 generations, what you ship is the **agent itself** — a general-purpose system you'll reuse on similar tasks, deploy in a product, or hand to a team.
+
+In this mode, **restarting from zero each generation makes perfect sense**. The exploration state from gen N is irrelevant — what matters is the agent's *code*, its prompts, its reasoning patterns. The meta-agent synthesizes feedback and produces a better agent. Each generation is a clean rewrite. Information transferred across generations should be minimal: ideally just a performance summary so the meta-agent knows whether it's improving. Carrying over the search tree would actually be noise — the tree is full of task-specific solutions that don't generalize.
+
+### Mode 2: the artifact is the solution
+
+Now imagine the goal is different: you want the **best possible solution to a specific, well-defined task**. A GPU kernel for a particular operation. A denoising algorithm on a fixed dataset. A strategy for a specific benchmark. You'll run this once, evaluate it, and submit. The final deliverable isn't the agent — it's what the agent *found*.
+
+In this mode, **restarting from zero is actively harmful**. Every generation that starts fresh throws away explored territory. The next generation will rediscover paths the previous one already visited, re-evaluate solutions that were already found to be mediocre, and burn compute re-learning the shape of a search space that was already partially mapped.
+
+Even restarting from the *best solution found so far* is problematic. You keep the local peak, but you lose all the branches that were promising-but-not-best, all the regions that turned out to be dead ends (so you don't explore them again), and all the variance information that tells you where the unexplored territory actually is. You're climbing from the summit of the last attempt with no memory of the mountain.
+
+---
+
+## What persistent tree search actually means
+
+The idea is to keep the search state — the tree — as the **primary persistent artifact** across all generations. Not the solution, not the agent code: the tree.
 
 ```
 runs/run_001/
@@ -43,110 +40,123 @@ runs/run_001/
     target_agent/
       target_agent.py      ← scaffold v1, continues from the same tree
       conf.yaml
-  ...
+  gen_2/
+    target_agent/
+      target_agent.py      ← scaffold v2, same tree, now with 200+ nodes
+      conf.yaml
 ```
 
-Each node in `tree_state.json` is a candidate solution with its score, parent, generation stamp, and PUCT statistics. Nodes are never deleted. New generations *continue* exploring the same tree — they can change their selection strategy, reweight exploration vs exploitation, add new heuristics — but the accumulated search history stays.
+Every candidate solution ever evaluated lives in `tree_state.json` as a node: its code, its score, its parent, which generation created it, and its PUCT visit statistics. Nodes are never deleted.
 
-What the meta-agent now improves isn't "what code to try" but "**how to search**": the PUCT selection policy, the prompt given to the inner LLM, the stagnation recovery logic, the cross-pollination of top nodes into new prompts.
+What changes across generations is the **scaffold** — the target agent's search strategy. The meta-agent can change how PUCT selects the next node to expand, how the inner LLM is prompted to generate mutations, when to restart from a different branch, how to cross-pollinate ideas from the top-scoring nodes. What it *cannot* do (by design) is erase the tree. The search history is fixed; only the search strategy evolves.
 
-The **final artifact** is the best leaf node in the tree — the actual solution, not the scaffolding that found it.
+The delivered artifact at the end is the **best leaf node** — extracted from the tree and handed off as a standalone solution.
+
+```
+tree_state.json  →  best_node.code  →  solution.py  ✓
+```
+
+The scaffold that found it is discarded. You don't need it anymore.
 
 ---
 
-## A supervision loop on top
+## The mechanisms that make it work
 
-One addition that pairs naturally with the persistent tree: a periodic supervisor that watches a running generation and decides whether to let it keep going or evolve the scaffold.
+A persistent tree alone isn't enough. Several mechanisms were built on top to make generation-over-generation improvement actually happen:
+
+### PUCT search with normalized Q-values
+
+The tree uses PUCT (Predictor + Upper Confidence bound for Trees) to balance exploitation of known-good nodes and exploration of new branches. One critical detail: Q-values must be normalized to [0,1] before computing the PUCT score.
+
+This sounds obvious but it bit us hard in early runs. Raw scores of ~6.6× completely swamped the exploration term (< 1.5), making selection purely greedy — the agent would hammer the same best node over and over rather than branching out. Once Q-values were normalized, real exploration kicked in.
+
+### Cross-pollination
+
+When the inner LLM is asked to generate a mutation of a parent node, it also receives the code of the **top-2 scoring nodes in the entire tree** (excluding the selected parent) injected into its system prompt. This lets it merge patterns from different branches — taking a memory optimization from one lineage and a kernel structure from another — without the PUCT selection needing to explicitly plan that.
+
+### Stagnation recovery
+
+If no new best score is found after N iterations, the agent forces selection away from the current local region. It picks a node from a different subtree as the new parent and injects a "fresh start" prompt that includes top context from the best nodes so far. This prevents the agent from getting trapped grinding one peak.
+
+### Seeding
+
+Rather than always starting gen 0 from a blank tree, a known good solution can be evaluated and inserted as the root node. Subsequent generations see this seed as their starting point. In run 8, updating the seed from 6.37× to 6.86× to 7.04× to 7.40× across generations gave the inner LLM a progressively better baseline to mutate from.
+
+### Supervision loop
+
+This is the piece that connects everything. The orchestrator runs a **supervision agent** on a timer that periodically queries an LLM to evaluate the current generation's trajectory and issue one of three decisions:
 
 ```
-supervisor decision: CONTINUE | EVOLVE | STOP
+CONTINUE  — the generation is making progress, let it run
+EVOLVE    — trigger the meta-agent now, start the next generation
+STOP      — the run is done, extract the best node
 ```
 
-The supervisor sees the tree state, the recent trajectory of scores, the bug rate, and makes a call. This is what lets the system exit early when a generation is stuck in a bad local region, rather than burning time hoping it recovers.
+The supervisor sees: the current tree state summary, the score trajectory of the last N nodes added, the bug rate (ratio of invalid submissions), and the generation's elapsed time versus budget.
+
+This matters because **generations don't have a natural stopping point**. A generation could find a good node in its first three submissions and then plateau for an hour. Or it could be stuck in a broken region but one more branch might unlock a jump. The supervisor makes this call dynamically rather than running each generation to a fixed time limit.
+
+In practice, the supervisor's most reliable signal was the bug rate. When 70–80% of newly evaluated nodes are syntactically broken kernels, the current scaffold is generating in a region of the code space where the inner LLM keeps failing. That's a strong signal to evolve — not because the tree is bad, but because the *strategy* needs to change.
 
 ---
 
 ## Run 8 — GPU kernel optimization, 20 generations
 
-To make this concrete: here's what one run looked like in practice, on a GPU kernel optimization task (AlphaFold-3 Outgoing TriMul, evaluated on H100). The target: maximize a speedup ratio versus a PyTorch reference kernel.
+One run on a GPU kernel optimization task (AlphaFold-3 Outgoing TriMul, T4). Goal: maximize speedup ratio vs. a PyTorch reference. Numbers below aren't meant to be compared to other hardware — the T4 is what it is — but the structure of how the score evolved is what's interesting.
 
-**Top-line numbers:**
-- Starting score (gen 0): **6.37×**
-- Best public score (gen 18): **7.37×** (+15.6%)
-- Best private score (gen 18): **6.52×** (+37% vs gen 0 private)
-- Total nodes evaluated across all generations: **431**
-- Total wall time: ~7.6h
+**Top-line:**
+- 431 nodes evaluated across 20 generations, ~7.6h wall time
+- Gen 0 → Gen 18: **+15.6%** on public score, **+37%** on private score
+- 6 distinct evolution families in the tree
 
-### How the tree grew across generations
+The run splits into those 6 families, each corresponding to a different meta-agent strategy:
 
-The run splits naturally into 6 phases (families):
+**F1 · Baseline** — First Triton kernel written from scratch. 6 nodes, establishes the starting score.
 
-**F1 · Baseline (gen 0)** — First Triton kernel written from scratch. 5-step pipeline: fused LayerNorm FP16, projection + gating, BatchedGEMM, fused OutLayerNorm. Scores 6.37× public, 4.76× private. Budget of 300s hit after 1519s — the first run was exploratory.
+**F2 · Infrastructure fixes (5 gens)** — The meta-agent spends five generations fixing the *scaffold*, not the kernel: parent code was truncated to ~80 lines before being passed to the inner LLM, UUID reuse caused node files to overwrite each other, and un-normalized PUCT (raw scores of ~6.6× crushing the exploration term < 1.5) made selection fully greedy. Once fixed, real exploration starts. **+4.8%** over baseline.
 
-**F2 · Infrastructure fixes (gen 1–5)** — The meta-agent spends 5 generations fixing the *scaffold*, not the kernel. Major bugs: the parent code was truncated to ~80 lines before being passed to the inner LLM (so it couldn't see the full kernel), UUID reuse causing node files to overwrite each other, PUCT Q-values not normalized (scores of ~6.6 were crushing the exploration term < 1.5, making selection fully greedy). After normalizing PUCT to [0,1] in gen 5, real exploration kicks in. Public score reaches 6.68×.
+**F3 · Ghost generations (4 gens, 0 nodes)** — A one-line indentation bug in `_trim_messages()` breaks the scope of `main()`. The target agent exits silently. Four consecutive generations add zero nodes. The supervisor detects the abnormal exit each time (no `exit_reason.txt` written) and triggers the next generation. The tree is intact — all prior nodes preserved — but four generation slots burned on a reproducible crash.
 
-**F3 · Ghost generations (gen 6–9)** — A one-line indentation bug in `_trim_messages()` breaks the scope of `main()`. The target agent exits silently, writes no output, adds zero nodes to the tree. Four consecutive dead generations. The score is frozen at 6.68×. The tree is intact — nothing was lost — but four generation slots were wasted on a bug that kept reproducing.
+**F4 · Task confusion** — The meta-agent hallucinates a task change and adds a filter hiding all nodes from generations < 9. The full tree is still in the file; the agent just can't see it. Causes a regression to near-zero before the next generation partially recovers.
 
-The persistent tree matters here: when gen 10 finally fixes the bug, it immediately has access to all 431 nodes accumulated before gen 6. Nothing was thrown away.
+**The tree mattered at this junction**: once the filter was removed in F5, the agent immediately found the best node from F2 (four families back) and used it as a parent. Three submissions later: new best. Starting fresh would have meant that node was gone.
 
-**F4 · Task confusion (gen 9–10)** — Gen 9 hallucinates a task change ("Outgoing TriMul" → "TriMul") and adds a filter that hides all nodes from generations < 9. The 431-node tree is still there in the file — but the agent can't see it. Gen 10 fixes the indentation bug but the filter remains, causing a regression to 3.23×. A one-line filter masked the entire search history.
+**F5 · Micro-optimizations** — Full tree visible again. Key discovery: **cache transposed FP16 weights in the `weights` dict during warmup**, eliminating repeated PyTorch allocations on every forward pass. First change that touches code *structure* rather than kernel parameters. **+3.9%** in one generation.
 
-**F5 · Micro-optimizations (gen 11–13)** — Gen 11 removes the gen < 9 filter. The agent immediately sees the 6.68× node from gen 4 and uses it as a parent. In 3 submissions it reaches 6.77×. The key discovery in gen 13: **caching transposed FP16 weights in the `weights` dict during the warmup call** — eliminating repeated PyTorch allocations on every forward pass. First rule that changes code *structure* rather than kernel parameters. Public jumps to 7.05×, private to 6.07×.
-
-**F6 · CUDA Graphs (gen 14–18)** — Gen 14 seeds a custom Triton GEMM benchmarked locally at 12.49×, but with a memory layout bug — the output `(B,N,N,H)` shape creates non-coalesced accesses downstream. Gen 15 reverts and introduces `torch.cuda.make_graphed_callables` via a `GraphWrapper`: captures the entire kernel sequence as a CUDA graph, eliminating ~0.15ms of CPU launch overhead per call. **Largest single jump of the run: +5.7%**, reaching 7.37× public. Gen 18 finalizes with BLOCK_K=32 and hardcoded `cols = tl.arange(0, 128)` to remove the D-loop. Gen 19 crashes on a duplicate keyword argument in the seed file — the run ends.
-
-### Score trajectory
-
-```
-Gen   Public Best   Private   Notes
- 0      6.37×       4.76×    Baseline kernel
- 1      6.61×         —      Scaffold fixes
- 2      3.25×       2.85×    Regression (0-byte parent)
- 3      6.67×       4.59×    Selection fixed
- 4      6.68×       4.76×    Cross-pollination added
- 5      6.68×       4.73×    PUCT normalized
- 6-9    6.68×         —      Ghost generations (indent bug)
-10      3.23×       2.82×    Gen<9 filter still active
-11      6.77×       5.08×    Filter removed, tree restored
-12      6.79×       5.03×    Seeding 6.86×
-13      7.05×       6.07×    Weight caching (+3.9%)
-14      6.97×       5.98×    False lead (custom GEMM)
-15      7.37×       6.50×    CUDA Graphs (+5.7%)
-16      7.33×       6.43×    tl.constexpr
-17      7.35×       6.49×    Reverted bad prompt
-18      7.37×       6.52×    Best: BLOCK_K=32, hardcoded loop
-19        —           —      Fatal crash
-```
+**F6 · CUDA Graphs (5 gens)** — Introduction of `torch.cuda.make_graphed_callables` via a `GraphWrapper`: captures the entire kernel call sequence as a CUDA graph, eliminating CPU launch overhead per forward pass. Largest single jump: **+5.7%**. Final generations stabilize with BLOCK_K=32 tuning. Run ends on gen 19 with a fatal crash (duplicate keyword argument in the seed file).
 
 ---
 
-## What actually made the difference
+## Honest takeaways
 
-Looking at the run honestly:
+**The persistent tree was load-bearing twice.** Gen 11's immediate recovery after four ghost generations and a task confusion, and gen 13's weight caching discovery built on top of that recovered state. In a restart-from-zero design, both of those inflection points would have been reset.
 
-**The persistent tree was load-bearing in two specific moments.** Gen 11 — after four ghost generations and a task confusion — recovered immediately by accessing the 6.68× node from gen 4. Without persistence, that node would have been gone and the run would have started from whatever gen 11's meta-agent wrote fresh. Gen 13's weight caching discovery was built on that recovered node.
+**Most generations were spent fixing scaffold bugs.** The meta-agent's real job was: fix the infrastructure (UUIDs, file validation, PUCT normalization, crash detection), not invent new kernel architectures. The inner LLM, given a working scaffold with good context, found the actual optimizations.
 
-**Most generations were spent fixing scaffold bugs, not finding better kernels.** The meta-agent's main job turned out to be: fix the search infrastructure (UUIDs, file validation, PUCT normalization, bug detection), not invent new kernel architectures. The inner LLM, given a good enough scaffold, found the actual optimizations.
+**The bug rate (~70–80%) was the supervisor's most reliable signal.** When the scaffold is generating into a region where the inner LLM keeps producing broken kernels, evolving the strategy makes more sense than waiting. The supervisor caught this repeatedly.
 
-**The bug rate was consistently high (~70–80% of nodes).** This is a sign that the search space is hard and the inner LLM often generates syntactically correct but semantically broken kernels. The supervisor correctly flagged this as a reason to evolve — but the tree still captures the ~20–30% valid nodes and their scores.
+**Ghost generation detection is an open problem.** The supervisor correctly identified the silent exits, but the meta-agent's input was a generation that "ran" with no output — making it hard to distinguish a crash from a slow run. Structured error types written to the tree node before any exit would close this loop.
 
-**Ghost generations reveal a design tension.** When the target agent crashes silently, the supervisor detects the abnormal exit and triggers the next generation. But the meta-agent sees a generation that "ran" with no output — it can misattribute the failure. Better crash instrumentation (structured error types written before exit) would help here.
-
----
-
-## The artifact
-
-The target agent that gets handed off at the end of a run is not `gen_18/target_agent/target_agent.py` — that's the scaffold. The artifact is the best node in `tree_state.json`: a standalone kernel file that can be dropped directly into the evaluation harness.
-
-The scaffold was how you got there. The kernel is what you keep.
+**The design only makes sense when the artifact is the solution.** If the goal were to build a reusable kernel-writing agent for a product, restarting from zero each generation would be the right call — the scaffold would generalize, the search history wouldn't. The persistent tree is specifically for the case where you want the best answer to this precise task, and losing exploration history is a real cost you want to avoid.
 
 ---
 
-## What's next
+## Open question: does this transfer to different benchmarks?
 
-A few open questions this run surfaces:
+GPU kernel optimization is a friendly setting for persistent tree search: the score is deterministic (run the kernel, measure speedup), the search space is continuous enough that neighboring nodes tend to have related scores, and the "artifact" is unambiguous (a piece of code that either runs fast or doesn't).
 
-- **Smarter supervision**: the current supervisor triggers on bug rate and node count. A richer signal — trajectory curvature, diversity of recently explored nodes, estimated remaining compute — would make EVOLVE decisions less reactive.
-- **Cross-run tree transfer**: if two runs on related tasks share a tree format, can gen 0 of run 2 seed from the best nodes of run 1?
-- **Meta-agent access to the full tree**: the meta-agent currently sees a text summary of the tree. Giving it direct structured access (top-N nodes, score distributions by branch) might reduce hallucinations like the gen 9 task confusion.
-- **Ghost generation detection**: the supervisor can detect a silent exit, but the *next* meta-agent needs to know it was a crash, not a normal run. Encoding failure type in the tree node would close this loop.
+It's worth asking whether this holds for benchmarks where the evaluation is fundamentally different.
+
+Take GPQA — a graduate-level science reasoning benchmark. Each question has one correct answer. The score of a "solution" (a reasoning strategy, a prompt, a chain-of-thought scaffold) is measured over a distribution of questions, not a single deterministic call. Two runs of the same strategy on the same question can give different answers. The search space isn't a smooth landscape of kernel parameters — it's a much noisier, higher-dimensional space of reasoning behaviors.
+
+A few things that might shift:
+
+**The Q-value signal is noisier.** In GPU kernels, a node's score is exact. In GPQA, a strategy's score is an average over many evaluations, and a single evaluation is stochastic. PUCT selection depends on reliable Q-values. With high-variance scores, the tree might spend many nodes disambiguating between genuinely different strategies vs. noise in the evaluation.
+
+**Dead ends are less informative.** In code optimization, knowing "this branch explored heavy Triton GEMM customization and it didn't work" is useful — you can avoid that direction. In reasoning benchmarks, knowing "this chain-of-thought style underperformed" is fuzzier — it might have underperformed *on these questions*, or *with this model*, or just due to sampling variance. The tree retains the information, but it's harder to act on.
+
+**The solution itself is less separable from the scaffold.** A GPU kernel can be extracted from the tree and run standalone. A reasoning strategy is more entangled with the agent that applies it — you'd be extracting a prompt or a behavior, not a file. Whether the "best node" in the tree is truly portable is a more open question.
+
+That said, the core argument still holds: if you're optimizing for a *specific* benchmark and the artifact is the best score you can achieve on it, you don't want to lose exploration history between generations. The question is whether the tree format — designed around deterministic, code-level scores — needs to adapt for stochastic, behavior-level evaluations. Maybe nodes need confidence intervals instead of point scores. Maybe selection should weight uncertainty differently. Maybe generations need to explicitly re-evaluate promising nodes to reduce noise before building on them.
+
+It's an open question whether the gains from persistent search in a setting like GPQA would outweigh the added complexity of managing a noisy tree — or whether a cleaner separation (persistent *memory* of what's been tried, but no explicit PUCT over it) would be the better fit there.
