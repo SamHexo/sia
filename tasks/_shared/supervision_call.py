@@ -91,10 +91,22 @@ def check_supervision(
         if delay > 0:
             _time.sleep(delay)
         try:
-            import litellm
+            import os as _os, litellm
+            _proxy: dict = {}
+            _base_url = _os.environ.get("LITELLM_BASE_URL")
+            if _os.environ.get("LITELLM_API_KEY"):
+                _proxy["api_key"] = _os.environ["LITELLM_API_KEY"]
+            if _base_url:
+                _proxy["api_base"] = _base_url
+            # Wrap model with openai/ when proxying so LiteLLM sends the full
+            # model name (e.g. azure_ai/gpt-5.5) to the proxy instead of routing directly.
+            _model = model
+            if _base_url and "/" in _model and not _model.startswith("openai/"):
+                _model = f"openai/{_model}"
             response = litellm.completion(
-                model=model,
+                model=_model,
                 messages=[{"role": "user", "content": prompt}],
+                **_proxy,
             )
             text = (response.choices[0].message.content or "").strip()
             # First line = decision word; remaining lines = reason

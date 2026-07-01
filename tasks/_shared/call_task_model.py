@@ -274,6 +274,33 @@ def _call_tinker_harmony(
 
 # ── litellm path ───────────────────────────────────────────────────────────────
 
+def _litellm_proxy_kwargs() -> dict[str, Any]:
+    """Return api_key/api_base kwargs when LiteLLM proxy env vars are set."""
+    out: dict[str, Any] = {}
+    api_key = os.environ.get("LITELLM_API_KEY")
+    api_base = os.environ.get("LITELLM_BASE_URL")
+    if api_key:
+        out["api_key"] = api_key
+    if api_base:
+        out["api_base"] = api_base
+    return out
+
+
+def _proxy_model_name(model: str) -> str:
+    """When routing through a LiteLLM proxy, wrap model with openai/ prefix.
+
+    LiteLLM client interprets provider prefixes (azure_ai/, gemini/, ...) as
+    routing hints and strips them before sending to the endpoint. Wrapping with
+    openai/ forces the OpenAI-compatible path, which sends the full model name
+    (e.g. azure_ai/gpt-5.5) as-is in the request body — exactly what the proxy expects.
+    """
+    if not os.environ.get("LITELLM_BASE_URL"):
+        return model
+    if "/" in model and not model.startswith("openai/"):
+        return f"openai/{model}"
+    return model
+
+
 def _call_litellm(
     messages: list[dict],
     model: str,
@@ -286,9 +313,10 @@ def _call_litellm(
     litellm_msgs = _to_openai_messages(messages)
 
     kwargs: dict[str, Any] = {
-        "model":       model,
+        "model":       _proxy_model_name(model),
         "messages":    litellm_msgs,
         "temperature": temperature,
+        **_litellm_proxy_kwargs(),
     }
     if tools:
         kwargs["tools"] = [

@@ -147,7 +147,7 @@ async def run_agent_openhands(model_name, max_turns, prompt, agent_working_direc
     start_time = datetime.now()
     trajectory_dir = os.path.join(agent_working_directory, "openhands_trajectory")
 
-    # Determine API key based on model provider
+    # Determine API key based on model provider; LITELLM_API_KEY is the universal proxy fallback
     m = model_name.lower()
     if "claude" in m or "anthropic" in m:
         api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -157,10 +157,22 @@ async def run_agent_openhands(model_name, max_turns, prompt, agent_working_direc
         api_key = os.getenv("OPENAI_API_KEY")
     else:
         api_key = os.getenv("LLM_API_KEY")
+    api_key = api_key or os.getenv("LITELLM_API_KEY")
+
+    _litellm_base_url = os.getenv("LITELLM_BASE_URL")
+
+    # When routing through a LiteLLM proxy, wrap model with openai/ so LiteLLM
+    # sends the full name (e.g. azure_ai/gpt-5.5) to the proxy instead of routing directly.
+    _effective_model = model_name
+    if _litellm_base_url and "/" in model_name and not model_name.startswith("openai/"):
+        _effective_model = f"openai/{model_name}"
 
     def _run_once(p: str) -> None:
         with _silence_openhands():
-            llm = LLM(model=model_name, api_key=api_key)
+            llm_kwargs = {"model": _effective_model, "api_key": api_key}
+            if _litellm_base_url:
+                llm_kwargs["base_url"] = _litellm_base_url
+            llm = LLM(**llm_kwargs)
             agent = Agent(
                 llm=llm,
                 tools=[Tool(name=TerminalTool.name), Tool(name=FileEditorTool.name)],

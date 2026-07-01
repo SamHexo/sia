@@ -352,10 +352,20 @@ def _llm_context_summary(
             f"Meta-agent improvement plan (excerpt):\n{improvement_md[:600]}\n\n"
             "Focus on: what strategy was tried, how scores changed, and what to watch next."
         )
+        _proxy_kw: dict = {}
+        _base_url = os.environ.get("LITELLM_BASE_URL")
+        if os.environ.get("LITELLM_API_KEY"):
+            _proxy_kw["api_key"] = os.environ["LITELLM_API_KEY"]
+        if _base_url:
+            _proxy_kw["api_base"] = _base_url
+        _model = meta_model
+        if _base_url and "/" in _model and not _model.startswith("openai/"):
+            _model = f"openai/{_model}"
         resp = litellm.completion(
-            model=meta_model,
+            model=_model,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=150,
+            **_proxy_kw,
         )
         return (resp.choices[0].message.content or "").strip()
     except Exception as _e:
@@ -502,13 +512,20 @@ def _required_api_key(model: str) -> tuple[str, list[str]]:
         return "Tinker", ["TINKER_API_KEY"]
     if any(m.startswith(p) for p in ("claude", "anthropic/")):
         return "Anthropic", ["ANTHROPIC_API_KEY"]
+    if any(m.startswith(p) for p in ("azure_ai/", "azure/")):
+        return "LiteLLM proxy", ["LITELLM_API_KEY"]
     return "OpenAI", ["OPENAI_API_KEY"]
 
 
 def _check_api_key(model: str) -> None:
     provider, candidates = _required_api_key(model)
-    if all(not os.environ.get(k) for k in candidates):
-        logger.error(f"Model '{model}' requires {provider} credentials — set {' or '.join(candidates)}")
+    # LITELLM_API_KEY is a universal fallback for proxy-routed models
+    all_candidates = candidates + ["LITELLM_API_KEY"]
+    if all(not os.environ.get(k) for k in all_candidates):
+        logger.error(
+            f"Model '{model}' requires {provider} credentials — "
+            f"set {' or '.join(candidates)} (or LITELLM_API_KEY for proxy routing)"
+        )
         sys.exit(1)
 
 
